@@ -1,4 +1,6 @@
 __pycache__/
 *.pyc
 .env
-temp_split_files/
+temp_split_files/*.pyc
+__pycache__
+.env
