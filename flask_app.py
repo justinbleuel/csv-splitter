@@ -355,33 +355,67 @@ def split_csv_endpoint():
     os.makedirs(temp_dir, exist_ok=True)
     
     try:
-        df = pd.read_csv(file)
+        # Read the first row to check if it's a table name
+        first_row = pd.read_csv(file, nrows=1)
+        file.seek(0)  # Reset file pointer
+        
+        # Check if first row is likely a table name (has fewer columns than the second row)
+        if len(first_row.columns) == 1:  # Table name row typically has only one column
+            # Read CSV with second row as header
+            table_name = first_row.iloc[0, 0]  # Store the table name
+            df = pd.read_csv(file, header=1)  # Use second row as header
+        else:
+            # Normal CSV with headers in first row
+            df = pd.read_csv(file)
+            table_name = None
+        
+        # Get total number of rows and calculate number of files needed
         total_rows = len(df)
         num_files = math.ceil(total_rows / max_rows)
         
+        # Create zip file in memory
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Split into multiple files
             for i in range(num_files):
+                # Calculate start and end indices for this chunk
                 start_idx = i * max_rows
                 end_idx = min((i + 1) * max_rows, total_rows)
-                output_file = f"part_{i + 1}.csv"
+                
+                # Extract the chunk of rows for this file
+                chunk_df = df.iloc[start_idx:end_idx].copy()
+                
+                # Create the output file
+                output_file = f"part_{i + 1}_of_{num_files}.csv"
                 output_path = os.path.join(temp_dir, output_file)
-                df[start_idx:end_idx].to_csv(output_path, index=False)
+                
+                # If there was a table name, add it as the first row
+                if table_name:
+                    with open(output_path, 'w', encoding='utf-8', newline='') as f:
+                        f.write(f"{table_name}\n")
+                    # Append the data with headers
+                    chunk_df.to_csv(output_path, index=False, mode='a')
+                else:
+                    # Normal save without table name
+                    chunk_df.to_csv(output_path, index=False)
+                
+                # Add to zip
                 zip_file.write(output_path, output_file)
         
+        # Reset buffer position
         zip_buffer.seek(0)
         
-        response = send_file(
+        # Return the zip file
+        return send_file(
             zip_buffer,
             mimetype='application/zip',
             as_attachment=True,
             download_name=f'split_{secure_filename(file.filename.replace(".csv", ""))}.zip'
         )
-        
-        return response
     
     except Exception as e:
-        return str(e), 500
+        print(f"Error: {str(e)}")  # For debugging
+        return f'Error processing file: {str(e)}', 500
     
     finally:
         if os.path.exists(temp_dir):
