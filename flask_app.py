@@ -9,7 +9,6 @@ from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
-# HTML template with all styling and JavaScript included
 TEMPLATE = '''
 <!DOCTYPE html>
 <html>
@@ -17,7 +16,6 @@ TEMPLATE = '''
     <title>CSV Splitter</title>
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <style>
-        /* Previous styles remain the same */
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background-color: #f0f0ff;
@@ -332,7 +330,6 @@ TEMPLATE = '''
 </html>
 '''
 
-# Flask routes remain the same
 @app.route('/')
 def index():
     return render_template_string(TEMPLATE)
