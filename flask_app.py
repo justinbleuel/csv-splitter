@@ -5,6 +5,7 @@ import os
 import io
 import zipfile
 import shutil
+import csv
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -351,58 +352,58 @@ def split_csv_endpoint():
     temp_dir = 'temp_split_files'
     os.makedirs(temp_dir, exist_ok=True)
     
+    # List of encodings to try
+    encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
+    
     try:
-        # Read the first row to check if it's a table name
-        first_row = pd.read_csv(file, nrows=1)
-        file.seek(0)  # Reset file pointer
-        
-        # Check if first row is likely a table name (has fewer columns than the second row)
-        if len(first_row.columns) == 1:  # Table name row typically has only one column
-            # Read CSV with second row as header
-            table_name = first_row.iloc[0, 0]  # Store the table name
-            df = pd.read_csv(file, header=1)  # Use second row as header
+        # Try different encodings
+        for encoding in encodings:
+            try:
+                file.seek(0)  # Reset file pointer for each attempt
+                # Read the first row to check if it's a table name
+                first_row = pd.read_csv(file, nrows=1, encoding=encoding)
+                file.seek(0)  # Reset file pointer
+                
+                # Check if first row is likely a table name
+                if len(first_row.columns) == 1:
+                    table_name = first_row.iloc[0, 0]
+                    df = pd.read_csv(file, header=1, encoding=encoding)
+                else:
+                    df = pd.read_csv(file, encoding=encoding)
+                    table_name = None
+                
+                break  # If successful, break the encoding loop
+            except UnicodeDecodeError:
+                continue
         else:
-            # Normal CSV with headers in first row
-            df = pd.read_csv(file)
-            table_name = None
+            # If no encoding worked
+            raise UnicodeDecodeError(f"Could not decode file with any of these encodings: {', '.join(encodings)}")
         
-        # Get total number of rows and calculate number of files needed
+        # Rest of the processing remains the same
         total_rows = len(df)
         num_files = math.ceil(total_rows / max_rows)
         
-        # Create zip file in memory
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            # Split into multiple files
             for i in range(num_files):
-                # Calculate start and end indices for this chunk
                 start_idx = i * max_rows
                 end_idx = min((i + 1) * max_rows, total_rows)
-                
-                # Extract the chunk of rows for this file
                 chunk_df = df.iloc[start_idx:end_idx].copy()
                 
-                # Create the output file
                 output_file = f"part_{i + 1}_of_{num_files}.csv"
                 output_path = os.path.join(temp_dir, output_file)
                 
-                # If there was a table name, add it as the first row
                 if table_name:
-                    with open(output_path, 'w', encoding='utf-8', newline='') as f:
+                    with open(output_path, 'w', encoding=encoding, newline='') as f:
                         f.write(f"{table_name}\n")
-                    # Append the data with headers
-                    chunk_df.to_csv(output_path, index=False, mode='a')
+                    chunk_df.to_csv(output_path, index=False, mode='a', encoding=encoding)
                 else:
-                    # Normal save without table name
-                    chunk_df.to_csv(output_path, index=False)
+                    chunk_df.to_csv(output_path, index=False, encoding=encoding)
                 
-                # Add to zip
                 zip_file.write(output_path, output_file)
         
-        # Reset buffer position
         zip_buffer.seek(0)
         
-        # Return the zip file
         return send_file(
             zip_buffer,
             mimetype='application/zip',
@@ -419,4 +420,4 @@ def split_csv_endpoint():
             shutil.rmtree(temp_dir)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5001)
