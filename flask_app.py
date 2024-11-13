@@ -1,4 +1,6 @@
 from flask import Flask, request, send_file, render_template_string
+from models import db, FileProcess
+import time
 import pandas as pd
 import math
 import os
@@ -7,8 +9,24 @@ import zipfile
 import shutil
 import csv
 from werkzeug.utils import secure_filename
+from datetime import datetime
 
 app = Flask(__name__)
+
+# Database configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///csv_splitter.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Initialize database
+db.init_app(app)
+
+# Create tables
+with app.app_context():
+    db.create_all()
+
+# Add these after the Flask app initialization
+app.processed_files = []
+app.total_splits = 0
 
 TEMPLATE = '''
 <!DOCTYPE html>
@@ -199,6 +217,10 @@ TEMPLATE = '''
                 </div>
             </div>
         </div>
+        
+        <!-- <div style="margin-top: 20px; text-align: center;">
+            <a href="/stats" style="color: #666; text-decoration: none;">View Usage Statistics</a>
+        </div> -->
     </div>
 
     <script>
@@ -335,6 +357,130 @@ TEMPLATE = '''
 def index():
     return render_template_string(TEMPLATE)
 
+@app.template_filter('format_number')
+def format_number(value):
+    return "{:,}".format(value)
+
+@app.template_filter('format_size')
+def format_size(size_mb):
+    if size_mb > 1024:
+        return f"{size_mb/1024:.2f} GB"
+    return f"{size_mb:.2f} MB"
+
+@app.route('/stats')
+def stats():
+    stats_template = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CSV Splitter Stats</title>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background-color: #f0f0ff;
+                margin: 0;
+                padding: 40px;
+            }
+            .container {
+                max-width: 800px;
+                margin: 0 auto;
+            }
+            .card {
+                background: white;
+                border-radius: 16px;
+                padding: 40px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+                margin-top: 20px;
+            }
+            .stat-number {
+                font-size: 48px;
+                color: #4ecdc4;
+                margin: 10px 0;
+            }
+            .recent-list {
+                margin-top: 20px;
+            }
+            .recent-item {
+                padding: 10px;
+                border-bottom: 1px solid #eee;
+            }
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin-bottom: 30px;
+            }
+            .stat-card {
+                background: #f8f9fa;
+                padding: 20px;
+                border-radius: 8px;
+                text-align: center;
+            }
+            .back-link {
+                display: inline-block;
+                margin-top: 20px;
+                color: #666;
+                text-decoration: none;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="card">
+                <h1>Usage Statistics</h1>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-number">{{ total_files }}</div>
+                        <p>Files Processed</p>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">{{ total_rows | format_number }}</div>
+                        <p>Total Rows Processed</p>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">{{ total_size | format_size }}</div>
+                        <p>Total Data Processed</p>
+                    </div>
+                </div>
+                
+                <h2>Recent Files</h2>
+                <div class="recent-list">
+                    {% for file in recent_files %}
+                    <div class="recent-item">
+                        <strong>{{ file.filename }}</strong>
+                        <br>
+                        <small>
+                            {{ file.formatted_timestamp }} - 
+                            Split into {{ file.num_parts }} parts - 
+                            {{ file.formatted_size }} - 
+                            {{ file.rows_processed | format_number }} rows
+                        </small>
+                    </div>
+                    {% endfor %}
+                </div>
+                
+                <a href="/" class="back-link">← Back to Splitter</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
+    
+    # Get statistics from database
+    recent_files = FileProcess.query.order_by(FileProcess.timestamp.desc()).limit(10).all()
+    total_files = FileProcess.query.count()
+    total_rows = db.session.query(db.func.sum(FileProcess.rows_processed)).scalar() or 0
+    total_size = db.session.query(db.func.sum(FileProcess.file_size)).scalar() or 0
+    
+    return render_template_string(
+        stats_template,
+        recent_files=recent_files,
+        total_files=total_files,
+        total_rows=total_rows,
+        total_size=total_size
+    )
+
 @app.route('/split', methods=['POST'])
 def split_csv_endpoint():
     if 'file' not in request.files:
@@ -356,6 +502,10 @@ def split_csv_endpoint():
     encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
     
     try:
+        start_time = time.time()
+        file_size = len(file.read()) / (1024 * 1024)  # Size in MB
+        file.seek(0)  # Reset file pointer
+        
         # Try different encodings
         for encoding in encodings:
             try:
@@ -383,6 +533,17 @@ def split_csv_endpoint():
         total_rows = len(df)
         num_files = math.ceil(total_rows / max_rows)
         
+        # Track this file processing
+        app.total_splits += 1
+        app.processed_files.append({
+            'filename': secure_filename(file.filename),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'num_parts': num_files
+        })
+        # Keep only last 100 files in memory
+        if len(app.processed_files) > 100:
+            app.processed_files = app.processed_files[-100:]
+        
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for i in range(num_files):
@@ -403,6 +564,17 @@ def split_csv_endpoint():
                 zip_file.write(output_path, output_file)
         
         zip_buffer.seek(0)
+        
+        # Create database record
+        process_record = FileProcess(
+            filename=secure_filename(file.filename),
+            num_parts=num_files,
+            rows_processed=total_rows,
+            processing_time=time.time() - start_time,
+            file_size=file_size
+        )
+        db.session.add(process_record)
+        db.session.commit()
         
         return send_file(
             zip_buffer,
