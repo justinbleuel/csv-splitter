@@ -2,18 +2,24 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const { Anthropic } = require('@anthropic-ai/sdk');
+const OpenAI = require('openai');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 8080;
 
-// Initialize Claude
+// Initialize APIs
 const anthropic = new Anthropic({
   apiKey: process.env.CLAUDE_API_KEY,
 });
 
-// Configure multer as before
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// Configure multer
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, 'uploads/');
@@ -27,13 +33,56 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10 MB
+    fileSize: 25 * 1024 * 1024 // 25MB limit
   }
 }).single('audio');
 
 app.use(cors());
 
-// Modified upload endpoint with Claude integration
+// Helper function for transcription
+async function transcribeAudio(filepath) {
+  try {
+    console.log('Starting transcription for:', filepath);
+    
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(filepath),
+      model: "whisper-1",
+      language: "en", // can be made dynamic based on needs
+      response_format: "text"
+    });
+
+    console.log('Transcription completed');
+    return transcription;
+  } catch (error) {
+    console.error('Transcription error:', error);
+    throw new Error(`Transcription failed: ${error.message}`);
+  }
+}
+
+// Helper function for summarization
+async function summarizeText(text) {
+  try {
+    console.log('Starting summarization');
+    
+    const message = await anthropic.messages.create({
+      model: "claude-3-opus-20240229",
+      max_tokens: 1024,
+      messages: [{
+        role: "user",
+        content: `Please provide a clear and concise summary of the following transcribed audio. 
+                  Focus on the main points and key takeaways: ${text}`
+      }]
+    });
+
+    console.log('Summarization completed');
+    return message.content[0].text;
+  } catch (error) {
+    console.error('Summarization error:', error);
+    throw new Error(`Summarization failed: ${error.message}`);
+  }
+}
+
+// Main upload and process endpoint
 app.post('/api/summarize', function(req, res) {
   upload(req, res, async function(err) {
     if (err) {
@@ -46,27 +95,26 @@ app.post('/api/summarize', function(req, res) {
     }
 
     try {
-      // For now, we'll use placeholder text since we haven't integrated speech-to-text yet
-      const transcribedText = "This is placeholder transcribed text. We'll add actual transcription next.";
+      console.log('Processing file:', req.file.filename);
 
-      // Send to Claude for summarization
-      const message = await anthropic.messages.create({
-        model: "claude-3-opus-20240229",
-        max_tokens: 1024,
-        messages: [{
-          role: "user",
-          content: `Please provide a clear and concise summary of the following transcribed audio. 
-                    Focus on the main points and key takeaways: ${transcribedText}`
-        }]
+      // Step 1: Transcribe the audio
+      const transcription = await transcribeAudio(req.file.path);
+      console.log('Transcription:', transcription.substring(0, 100) + '...');
+
+      // Step 2: Summarize the transcription
+      const summary = await summarizeText(transcription);
+
+      // Step 3: Clean up - delete the uploaded file
+      fs.unlink(req.file.path, (err) => {
+        if (err) console.error('Error deleting file:', err);
       });
 
-      const summary = message.content[0].text;
-
+      // Send response
       res.json({
         status: 'success',
         summary: summary,
+        transcription: transcription, // Optionally include the full transcription
         fileInfo: {
-          filename: req.file.filename,
           originalname: req.file.originalname,
           size: req.file.size,
           mimetype: req.file.mimetype
@@ -79,6 +127,13 @@ app.post('/api/summarize', function(req, res) {
         error: 'Error processing audio',
         details: error.message 
       });
+
+      // Clean up on error
+      if (req.file) {
+        fs.unlink(req.file.path, (err) => {
+          if (err) console.error('Error deleting file:', err);
+        });
+      }
     }
   });
 });
