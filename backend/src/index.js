@@ -5,14 +5,22 @@ const path = require('path');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8080;
 
 // Update CORS to accept Railway's domain
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:8081',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Accept']
+  //origin: process.env.FRONTEND_URL || 'http://localhost:8081',
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Origin'],
+  credentials: true
 }));
+
+// Make sure the uploads directory exists
+const fs = require('fs');
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads');
+}
 
 // Configure multer for audio file uploads
 const storage = multer.diskStorage({
@@ -48,35 +56,41 @@ app.use(cors({
 
 // Audio upload endpoint
 app.post('/api/summarize', (req, res) => {
-  upload(req, res, function(err) {
-    if (err instanceof multer.MulterError) {
-      console.error('Multer error:', err);
-      return res.status(400).json({ error: 'File upload error: ' + err.message });
-    } else if (err) {
-      console.error('Other error:', err);
-      return res.status(400).json({ error: err.message });
-    }
-
-    if (!req.file) {
-      console.log('No file received');
-      return res.status(400).json({ error: 'No audio file uploaded' });
-    }
-
-    console.log('File successfully uploaded:', req.file);
-
-    // Send success response
-    res.json({
-      status: 'success',
-      summary: 'Test summary - file uploaded successfully',
-      fileInfo: {
-        filename: req.file.filename,
-        originalName: req.file.originalname,
-        size: req.file.size,
-        mimetype: req.file.mimetype
+    console.log('Received request to /api/summarize');
+    
+    upload(req, res, function(err) {
+      if (err instanceof multer.MulterError) {
+        console.error('Multer error:', err);
+        return res.status(400).json({ error: 'File upload error: ' + err.message });
+      } else if (err) {
+        console.error('Other error:', err);
+        return res.status(400).json({ error: err.message });
       }
+  
+      if (!req.file) {
+        console.log('No file received');
+        return res.status(400).json({ error: 'No audio file uploaded' });
+      }
+  
+      console.log('File successfully uploaded:', req.file);
+  
+      res.json({
+        status: 'success',
+        summary: 'Test summary - file uploaded successfully',
+        fileInfo: {
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          size: req.file.size,
+          mimetype: req.file.mimetype
+        }
+      });
     });
   });
-});
+
+// Add a test endpoint
+app.get('/test', (req, res) => {
+    res.json({ message: 'Backend is working!' });
+  });
 
 app.listen(port, '0.0.0.0', () => {
     console.log(`Server running on port ${port}`);
