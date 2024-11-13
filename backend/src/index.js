@@ -7,6 +7,13 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Update CORS to accept Railway's domain
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:8081',
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Accept']
+}));
+
 // Configure multer for audio file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -71,6 +78,6 @@ app.post('/api/summarize', (req, res) => {
   });
 });
 
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
-});
+app.listen(port, '0.0.0.0', () => {
+    console.log(`Server running on port ${port}`);
+  });
