@@ -2,25 +2,28 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
+const { Anthropic } = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 8080;
 
-// Configure storage
+// Initialize Claude
+const anthropic = new Anthropic({
+  apiKey: process.env.CLAUDE_API_KEY,
+});
+
+// Configure multer as before
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    console.log('Storage destination called for file:', file);
     cb(null, 'uploads/');
   },
   filename: function (req, file, cb) {
-    console.log('Storage filename called for file:', file);
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
   }
 });
 
-// Configure multer
 const upload = multer({
   storage: storage,
   limits: {
@@ -28,45 +31,55 @@ const upload = multer({
   }
 }).single('audio');
 
-// Configure CORS
 app.use(cors());
 
-// Endpoint to handle file upload
+// Modified upload endpoint with Claude integration
 app.post('/api/summarize', function(req, res) {
-  console.log('Received request to /api/summarize');
-  console.log('Content-Type:', req.headers['content-type']);
-  
-  upload(req, res, function(err) {
-    if (err instanceof multer.MulterError) {
-      // A Multer error occurred when uploading.
-      console.error('Multer error:', err);
-      return res.status(400).json({ error: `Upload error: ${err.message}` });
-    } else if (err) {
-      // An unknown error occurred when uploading.
-      console.error('Unknown error:', err);
-      return res.status(500).json({ error: err.message });
+  upload(req, res, async function(err) {
+    if (err) {
+      console.error('Upload error:', err);
+      return res.status(400).json({ error: err.message });
     }
-    
-    // Everything went fine.
-    console.log('Upload completed. File:', req.file);
-    
+
     if (!req.file) {
-      console.log('No file in request:', req.body);
       return res.status(400).json({ error: 'No audio file uploaded' });
     }
 
-    // Process the uploaded file
-    res.json({
-      status: 'success',
-      message: 'File uploaded successfully',
-      fileInfo: {
-        filename: req.file.filename,
-        originalname: req.file.originalname,
-        size: req.file.size,
-        mimetype: req.file.mimetype
-      },
-      summary: 'Test summary - file uploaded successfully'
-    });
+    try {
+      // For now, we'll use placeholder text since we haven't integrated speech-to-text yet
+      const transcribedText = "This is placeholder transcribed text. We'll add actual transcription next.";
+
+      // Send to Claude for summarization
+      const message = await anthropic.messages.create({
+        model: "claude-3-opus-20240229",
+        max_tokens: 1024,
+        messages: [{
+          role: "user",
+          content: `Please provide a clear and concise summary of the following transcribed audio. 
+                    Focus on the main points and key takeaways: ${transcribedText}`
+        }]
+      });
+
+      const summary = message.content[0].text;
+
+      res.json({
+        status: 'success',
+        summary: summary,
+        fileInfo: {
+          filename: req.file.filename,
+          originalname: req.file.originalname,
+          size: req.file.size,
+          mimetype: req.file.mimetype
+        }
+      });
+
+    } catch (error) {
+      console.error('Processing error:', error);
+      res.status(500).json({ 
+        error: 'Error processing audio',
+        details: error.message 
+      });
+    }
   });
 });
 
