@@ -7,25 +7,9 @@ require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 8080;
 
-// Update CORS to accept Railway's domain
-app.use(cors({
-  //origin: process.env.FRONTEND_URL || 'http://localhost:8081',
-  origin: '*',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Accept', 'Origin'],
-  credentials: true
-}));
-
-// Make sure the uploads directory exists
-const fs = require('fs');
-if (!fs.existsSync('uploads')) {
-  fs.mkdirSync('uploads');
-}
-
-// Configure multer for audio file uploads
+// Configure storage
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    console.log('Processing file:', file);
     cb(null, 'uploads/');
   },
   filename: (req, file, cb) => {
@@ -34,64 +18,81 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({
+const upload = multer({ 
   storage: storage,
-  fileFilter: (req, file, cb) => {
-    console.log('Received file:', file);
-    // Accept all audio files
-    if (file.mimetype.startsWith('audio/') || file.originalname.match(/\.(mp3|wav|m4a|aac|ogg)$/)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only audio files are allowed!'));
-    }
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB limit
   }
 }).single('audio');
 
-// Middleware
+// Detailed CORS configuration
 app.use(cors({
-  origin: 'http://localhost:8081',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Accept']
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept'],
+  credentials: true,
 }));
 
-// Audio upload endpoint
+// Create uploads directory if it doesn't exist
+const fs = require('fs');
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads');
+}
+
+// Test route
+app.get('/test', (req, res) => {
+  res.json({ message: 'Server is working!' });
+});
+
+// Upload endpoint with detailed logging
 app.post('/api/summarize', (req, res) => {
-    console.log('Received request to /api/summarize');
+  console.log('Received upload request');
+  console.log('Headers:', req.headers);
+  
+  upload(req, res, function(err) {
+    console.log('Processing upload...');
     
-    upload(req, res, function(err) {
-      if (err instanceof multer.MulterError) {
-        console.error('Multer error:', err);
-        return res.status(400).json({ error: 'File upload error: ' + err.message });
-      } else if (err) {
-        console.error('Other error:', err);
-        return res.status(400).json({ error: err.message });
-      }
-  
-      if (!req.file) {
-        console.log('No file received');
-        return res.status(400).json({ error: 'No audio file uploaded' });
-      }
-  
-      console.log('File successfully uploaded:', req.file);
-  
-      res.json({
-        status: 'success',
-        summary: 'Test summary - file uploaded successfully',
-        fileInfo: {
-          filename: req.file.filename,
-          originalName: req.file.originalname,
-          size: req.file.size,
-          mimetype: req.file.mimetype
-        }
+    if (err) {
+      console.error('Upload error:', err);
+      return res.status(400).json({
+        error: err.message,
+        details: err.stack
       });
+    }
+
+    if (!req.file) {
+      console.log('No file in request');
+      return res.status(400).json({
+        error: 'No file uploaded',
+        body: req.body
+      });
+    }
+
+    console.log('File received:', req.file);
+
+    // Send success response
+    res.json({
+      status: 'success',
+      message: 'File uploaded successfully',
+      file: {
+        name: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype
+      }
     });
   });
+});
 
-// Add a test endpoint
-app.get('/test', (req, res) => {
-    res.json({ message: 'Backend is working!' });
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Global error handler:', err);
+  res.status(500).json({
+    error: 'Server error',
+    message: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
   });
+});
 
 app.listen(port, '0.0.0.0', () => {
-    console.log(`Server running on port ${port}`);
-  });
+  console.log(`Server running on port ${port}`);
+});
