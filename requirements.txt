@@ -2,4 +2,6 @@ flask==3.0.0
 pandas==2.2.0
 gunicorn==21.2.0
 flask-sqlalchemy==3.1.1
-gevent==23.9.1
+psycopg2-binary==2.9.9
+sendgrid==6.11.0
+twilio==8.11.0

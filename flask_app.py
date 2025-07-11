@@ -1,5 +1,10 @@
 from flask import Flask, request, send_file, render_template_string, jsonify
-from models import db, FileProcess
+try:
+    from models import db, FileProcess
+    HAS_DB = True
+except Exception as e:
+    print(f"Database models not available: {e}")
+    HAS_DB = False
 import time
 import pandas as pd
 import math
@@ -13,24 +18,99 @@ from datetime import datetime
 import uuid
 import threading
 
+# Notification imports
+try:
+    from sendgrid import SendGridAPIClient
+    from sendgrid.helpers.mail import Mail
+    HAS_SENDGRID = True
+except ImportError:
+    HAS_SENDGRID = False
+    print("SendGrid not available - email notifications disabled")
+
+try:
+    from twilio.rest import Client as TwilioClient
+    HAS_TWILIO = True
+except ImportError:
+    HAS_TWILIO = False
+    print("Twilio not available - SMS notifications disabled")
+
 app = Flask(__name__)
 
-# Database configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///csv_splitter.db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# Initialize database
-db.init_app(app)
-
-# Create tables
-with app.app_context():
-    db.create_all()
+# Database configuration - only if available
+if HAS_DB:
+    # Fix for Railway PostgreSQL (they use postgresql:// but SQLAlchemy needs postgresql://)
+    database_url = os.environ.get('DATABASE_URL', 'sqlite:///csv_splitter.db')
+    if database_url and database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    
+    try:
+        # Initialize database
+        db.init_app(app)
+        # Create tables with proper context
+        with app.app_context():
+            db.create_all()
+            print("Database initialized successfully")
+    except Exception as e:
+        print(f"Database initialization failed: {e}")
+        print("Continuing without database features")
+        HAS_DB = False
 
 # Add these after the Flask app initialization
 app.processed_files = []
 app.total_splits = 0
 # Progress tracking for large files
 app.processing_status = {}
+
+# Notification configuration
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
+NOTIFICATION_EMAIL = os.environ.get('NOTIFICATION_EMAIL')
+TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN')
+TWILIO_PHONE_FROM = os.environ.get('TWILIO_PHONE_FROM')
+NOTIFICATION_PHONE = os.environ.get('NOTIFICATION_PHONE')
+
+def send_notification(filename, num_parts, total_rows, file_size):
+    """Send email and/or SMS notification about file processing"""
+    
+    # Email notification
+    if HAS_SENDGRID and SENDGRID_API_KEY and NOTIFICATION_EMAIL:
+        try:
+            message = Mail(
+                from_email='noreply@csv-splitter.app',
+                to_emails=NOTIFICATION_EMAIL,
+                subject='CSV File Processed',
+                html_content=f'''
+                <h3>CSV File Processed</h3>
+                <p>A new CSV file has been processed:</p>
+                <ul>
+                    <li><strong>Filename:</strong> {filename}</li>
+                    <li><strong>Size:</strong> {file_size:.2f} MB</li>
+                    <li><strong>Total Rows:</strong> {total_rows:,}</li>
+                    <li><strong>Split into:</strong> {num_parts} parts</li>
+                    <li><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}</li>
+                </ul>
+                '''
+            )
+            sg = SendGridAPIClient(SENDGRID_API_KEY)
+            sg.send(message)
+            print(f"Email notification sent to {NOTIFICATION_EMAIL}")
+        except Exception as e:
+            print(f"Failed to send email: {e}")
+    
+    # SMS notification
+    if HAS_TWILIO and all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_FROM, NOTIFICATION_PHONE]):
+        try:
+            client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+            message = client.messages.create(
+                body=f"CSV Processed: {filename} ({file_size:.1f}MB, {total_rows:,} rows, {num_parts} parts)",
+                from_=TWILIO_PHONE_FROM,
+                to=NOTIFICATION_PHONE
+            )
+            print(f"SMS notification sent to {NOTIFICATION_PHONE}")
+        except Exception as e:
+            print(f"Failed to send SMS: {e}")
 
 TEMPLATE = '''
 <!DOCTYPE html>
@@ -428,8 +508,100 @@ def format_size(size_mb):
         return f"{size_mb/1024:.2f} GB"
     return f"{size_mb:.2f} MB"
 
+@app.route('/debug-db')
+def debug_db():
+    """Debug database configuration"""
+    import sys
+    debug_info = f"""
+    <h1>Database Debug Info</h1>
+    <ul>
+        <li>HAS_DB: {HAS_DB}</li>
+        <li>DATABASE_URL exists: {'DATABASE_URL' in os.environ}</li>
+        <li>DATABASE_URL value: {os.environ.get('DATABASE_URL', 'Not set')[:50]}...</li>
+        <li>Python version: {sys.version}</li>
+    </ul>
+    """
+    
+    if HAS_DB:
+        try:
+            count = FileProcess.query.count()
+            debug_info += f"<p>✅ Database connection successful. Records: {count}</p>"
+        except Exception as e:
+            debug_info += f"<p>❌ Database query failed: {str(e)}</p>"
+    
+    return debug_info
+
+@app.route('/test-db-save')
+def test_db_save():
+    """Test database saving directly"""
+    if not HAS_DB:
+        return "Database not configured", 503
+    
+    try:
+        test_record = FileProcess(
+            filename="test_manual_save.csv",
+            num_parts=3,
+            rows_processed=150000,
+            processing_time=5.5,
+            file_size=25.5
+        )
+        db.session.add(test_record)
+        db.session.commit()
+        
+        count = FileProcess.query.count()
+        return f"""
+        <h1>✅ Test Save Successful!</h1>
+        <p>Record saved. Total records now: {count}</p>
+        <p><a href="/stats">View Stats</a></p>
+        """
+    except Exception as e:
+        return f"""
+        <h1>❌ Test Save Failed</h1>
+        <p>Error: {str(e)}</p>
+        """, 500
+
+@app.route('/init-db')
+def init_db_route():
+    """Initialize database tables - visit this URL once after deployment"""
+    if not HAS_DB:
+        return "Database not configured", 503
+    
+    try:
+        with app.app_context():
+            db.create_all()
+            # Test by creating a sample record
+            test_record = FileProcess(
+                filename="test_init.csv",
+                num_parts=1,
+                rows_processed=0,
+                processing_time=0,
+                file_size=0
+            )
+            db.session.add(test_record)
+            db.session.commit()
+            # Delete the test record
+            db.session.delete(test_record)
+            db.session.commit()
+            
+        return '''
+        <h1>✅ Database Initialized Successfully!</h1>
+        <p>Tables have been created. You can now:</p>
+        <ul>
+            <li><a href="/">Go to the main app</a></li>
+            <li><a href="/stats">View statistics</a></li>
+        </ul>
+        '''
+    except Exception as e:
+        return f'''
+        <h1>❌ Database Initialization Failed</h1>
+        <p>Error: {str(e)}</p>
+        <p>Make sure DATABASE_URL is set correctly in Railway.</p>
+        ''', 500
+
 @app.route('/stats')
 def stats():
+    if not HAS_DB:
+        return "Statistics not available without database", 503
     stats_template = '''
     <!DOCTYPE html>
     <html>
@@ -529,10 +701,14 @@ def stats():
     '''
     
     # Get statistics from database
-    recent_files = FileProcess.query.order_by(FileProcess.timestamp.desc()).limit(10).all()
-    total_files = FileProcess.query.count()
-    total_rows = db.session.query(db.func.sum(FileProcess.rows_processed)).scalar() or 0
-    total_size = db.session.query(db.func.sum(FileProcess.file_size)).scalar() or 0
+    try:
+        recent_files = FileProcess.query.order_by(FileProcess.timestamp.desc()).limit(10).all()
+        total_files = FileProcess.query.count()
+        total_rows = db.session.query(db.func.sum(FileProcess.rows_processed)).scalar() or 0
+        total_size = db.session.query(db.func.sum(FileProcess.file_size)).scalar() or 0
+    except Exception as e:
+        print(f"Could not get stats: {e}")
+        return "Statistics temporarily unavailable", 503
     
     return render_template_string(
         stats_template,
@@ -549,6 +725,9 @@ def get_progress(task_id):
 
 @app.route('/split', methods=['POST'])
 def split_csv_endpoint():
+    print(f"=== Starting file upload processing ===")
+    print(f"HAS_DB at start: {HAS_DB}")
+    
     # For chunked processing of large files
     CHUNK_SIZE = 10000  # Process 10k rows at a time
     if 'file' not in request.files:
@@ -643,6 +822,8 @@ def split_csv_endpoint():
         total_rows = len(df)
         num_files = math.ceil(total_rows / max_rows)
         
+        print(f"File processed: {file.filename}, rows: {total_rows}, parts: {num_files}")
+        
         # Track this file processing
         app.total_splits += 1
         app.processed_files.append({
@@ -695,16 +876,32 @@ def split_csv_endpoint():
         
         zip_buffer.seek(0)
         
-        # Create database record
-        process_record = FileProcess(
-            filename=secure_filename(file.filename),
-            num_parts=num_files,
-            rows_processed=total_rows,
-            processing_time=time.time() - start_time,
-            file_size=file_size
-        )
-        db.session.add(process_record)
-        db.session.commit()
+        # Create database record if available
+        print(f"About to save to database. HAS_DB={HAS_DB}, filename={file.filename}")
+        if HAS_DB:
+            try:
+                process_record = FileProcess(
+                    filename=secure_filename(file.filename),
+                    num_parts=num_files,
+                    rows_processed=total_rows,
+                    processing_time=time.time() - start_time,
+                    file_size=file_size
+                )
+                db.session.add(process_record)
+                db.session.commit()
+                print(f"Successfully saved to database: {secure_filename(file.filename)}")
+                app.logger.info(f"Database save successful: {secure_filename(file.filename)}")
+            except Exception as e:
+                print(f"Could not save to database: {e}")
+                app.logger.error(f"Database save failed: {e}")
+        else:
+            print(f"No database available (HAS_DB={HAS_DB})")
+        
+        # Send notification
+        threading.Thread(
+            target=send_notification,
+            args=(secure_filename(file.filename), num_files, total_rows, file_size)
+        ).start()
         
         # Mark as complete
         app.processing_status[task_id] = {
@@ -721,7 +918,10 @@ def split_csv_endpoint():
         )
     
     except Exception as e:
-        print(f"Error: {str(e)}")  # For debugging
+        print(f"ERROR in split_csv_endpoint: {str(e)}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
         return f'Error processing file: {str(e)}', 500
     
     finally:
@@ -730,10 +930,16 @@ def split_csv_endpoint():
 
 def process_large_file_async(temp_upload, max_rows, task_id, original_filename, encodings):
     """Process large files asynchronously"""
+    print(f"=== Starting async processing for {original_filename} ===")
+    print(f"HAS_DB in async: {HAS_DB}")
     temp_dir = f'temp_split_files_{task_id}'
     os.makedirs(temp_dir, exist_ok=True)
     
     try:
+        start_time = time.time()  # Track processing time
+        # Get file size
+        file_size = os.path.getsize(temp_upload) / (1024 * 1024)  # in MB
+        print(f"File size: {file_size:.2f} MB")
         # Try different encodings
         for encoding in encodings:
             try:
@@ -808,16 +1014,34 @@ def process_large_file_async(temp_upload, max_rows, task_id, original_filename, 
             'original_filename': original_filename
         }
         
-        # Track in database
-        process_record = FileProcess(
-            filename=secure_filename(original_filename),
-            num_parts=num_files,
-            rows_processed=total_rows,
-            processing_time=time.time() - time.time(),
-            file_size=os.path.getsize(temp_upload) / (1024 * 1024)
-        )
-        db.session.add(process_record)
-        db.session.commit()
+        # Track in database if available
+        print(f"About to save async file to database. HAS_DB={HAS_DB}")
+        if HAS_DB:
+            try:
+                # Need app context for database operations in thread
+                with app.app_context():
+                    process_record = FileProcess(
+                        filename=secure_filename(original_filename),
+                        num_parts=num_files,
+                        rows_processed=total_rows,
+                        processing_time=time.time() - start_time,
+                        file_size=file_size
+                    )
+                    db.session.add(process_record)
+                    db.session.commit()
+                    print(f"Successfully saved async file to database: {original_filename}")
+            except Exception as e:
+                print(f"Could not save to database: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"No database available in async (HAS_DB={HAS_DB})")
+        
+        # Send notification for async processing
+        threading.Thread(
+            target=send_notification,
+            args=(secure_filename(original_filename), num_files, total_rows, file_size)
+        ).start()
         
     except Exception as e:
         app.processing_status[task_id] = {
@@ -865,4 +1089,4 @@ def download_result(task_id):
     )
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    app.run(debug=True, host='0.0.0.0', port=5001)
