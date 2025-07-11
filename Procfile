@@ -1,1 +1,1 @@
-web: gunicorn flask_app:app --bind 0.0.0.0:8000
+web: gunicorn flask_app:app --bind 0.0.0.0:8000 --timeout 300 --worker-class gevent

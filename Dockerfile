@@ -19,4 +19,4 @@ COPY . .
 ENV PORT=8000
 
 # Command to run the application
-CMD gunicorn flask_app:app --bind 0.0.0.0:$PORT
+CMD gunicorn flask_app:app --bind 0.0.0.0:$PORT --timeout 300 --worker-class gevent

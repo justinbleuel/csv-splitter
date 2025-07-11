@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, render_template_string
+from flask import Flask, request, send_file, render_template_string, jsonify
 from models import db, FileProcess
 import time
 import pandas as pd
@@ -10,6 +10,8 @@ import shutil
 import csv
 from werkzeug.utils import secure_filename
 from datetime import datetime
+import uuid
+import threading
 
 app = Flask(__name__)
 
@@ -27,6 +29,8 @@ with app.app_context():
 # Add these after the Flask app initialization
 app.processed_files = []
 app.total_splits = 0
+# Progress tracking for large files
+app.processing_status = {}
 
 TEMPLATE = '''
 <!DOCTYPE html>
@@ -201,6 +205,12 @@ TEMPLATE = '''
 
         <div class="loading-container" id="loading">
             <div class="spinner"></div>
+            <div class="progress-info" id="progress-info" style="display: none; margin-top: 20px; color: white;">
+                <p id="progress-message">Processing...</p>
+                <div style="width: 300px; height: 20px; background-color: rgba(255,255,255,0.3); border-radius: 10px; margin: 10px auto;">
+                    <div id="progress-bar" style="width: 0%; height: 100%; background-color: white; border-radius: 10px; transition: width 0.3s;"></div>
+                </div>
+            </div>
         </div>
 
             <div class="success-container" id="success-container">
@@ -284,14 +294,26 @@ TEMPLATE = '''
 
                 if (!response.ok) throw new Error('Failed to process file');
 
-                const blob = await response.blob();
-                const downloadUrl = window.URL.createObjectURL(blob);
-                
-                const downloadBtn = document.getElementById('download-btn');
-                downloadBtn.href = downloadUrl;
-                downloadBtn.download = 'split_csv_files.zip';
-                
-                showSuccess();
+                // Check if it's an async task
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const data = await response.json();
+                    if (data.task_id) {
+                        // Large file processing
+                        document.getElementById('progress-info').style.display = 'block';
+                        await trackProgress(data.task_id);
+                    }
+                } else {
+                    // Small file - direct download
+                    const blob = await response.blob();
+                    const downloadUrl = window.URL.createObjectURL(blob);
+                    
+                    const downloadBtn = document.getElementById('download-btn');
+                    downloadBtn.href = downloadUrl;
+                    downloadBtn.download = 'split_csv_files.zip';
+                    
+                    showSuccess();
+                }
             } catch (error) {
                 alert('Error processing file: ' + error.message);
                 resetForm();
@@ -341,12 +363,51 @@ TEMPLATE = '''
     });
 }
 
+        async function trackProgress(taskId) {
+            const progressBar = document.getElementById('progress-bar');
+            const progressMessage = document.getElementById('progress-message');
+            
+            const checkInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/progress/${taskId}`);
+                    const status = await response.json();
+                    
+                    if (status.status === 'processing') {
+                        progressBar.style.width = status.progress + '%';
+                        progressMessage.textContent = status.message;
+                    } else if (status.status === 'complete') {
+                        clearInterval(checkInterval);
+                        progressBar.style.width = '100%';
+                        progressMessage.textContent = 'Processing complete!';
+                        
+                        // Set download link
+                        const downloadBtn = document.getElementById('download-btn');
+                        downloadBtn.href = `/download/${taskId}`;
+                        downloadBtn.removeAttribute('download');
+                        
+                        setTimeout(() => {
+                            showSuccess();
+                        }, 500);
+                    } else if (status.status === 'error') {
+                        clearInterval(checkInterval);
+                        throw new Error(status.message);
+                    }
+                } catch (error) {
+                    clearInterval(checkInterval);
+                    alert('Error: ' + error.message);
+                    resetForm();
+                }
+            }, 1000);
+        }
+        
         function resetForm() {
             document.getElementById('upload-form').reset();
             fileName.textContent = 'Drop your CSV file here or click to browse';
             document.getElementById('upload-form').style.display = 'block';
             document.getElementById('success-container').style.display = 'none';
             document.getElementById('loading').style.display = 'none';
+            document.getElementById('progress-info').style.display = 'none';
+            document.getElementById('progress-bar').style.width = '0%';
         }
     </script>
 </body>
@@ -481,8 +542,15 @@ def stats():
         total_size=total_size
     )
 
+@app.route('/progress/<task_id>', methods=['GET'])
+def get_progress(task_id):
+    status = app.processing_status.get(task_id, {'status': 'not_found'})
+    return jsonify(status)
+
 @app.route('/split', methods=['POST'])
 def split_csv_endpoint():
+    # For chunked processing of large files
+    CHUNK_SIZE = 10000  # Process 10k rows at a time
     if 'file' not in request.files:
         return 'No file uploaded', 400
     
@@ -501,10 +569,38 @@ def split_csv_endpoint():
     # List of encodings to try
     encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
     
+    # Generate task ID for progress tracking
+    task_id = str(uuid.uuid4())
+    
+    # Initialize progress tracking
+    app.processing_status[task_id] = {
+        'status': 'processing',
+        'progress': 0,
+        'message': 'Starting file processing...'
+    }
+    
     try:
         start_time = time.time()
         file_size = len(file.read()) / (1024 * 1024)  # Size in MB
         file.seek(0)  # Reset file pointer
+        
+        # Return task ID immediately for large files
+        if file_size > 50:
+            # Save file temporarily
+            temp_upload = f'temp_upload_{task_id}.csv'
+            file.save(temp_upload)
+            
+            # Process in background thread
+            thread = threading.Thread(
+                target=process_large_file_async,
+                args=(temp_upload, max_rows, task_id, file.filename, encodings)
+            )
+            thread.start()
+            
+            return jsonify({
+                'task_id': task_id,
+                'message': 'Processing large file in background'
+            }), 202
         
         # Try different encodings
         for encoding in encodings:
@@ -517,9 +613,23 @@ def split_csv_endpoint():
                 # Check if first row is likely a table name
                 if len(first_row.columns) == 1:
                     table_name = first_row.iloc[0, 0]
-                    df = pd.read_csv(file, header=1, encoding=encoding)
+                    # For large files, read in chunks
+                    if file_size > 50:  # If file is larger than 50MB
+                        chunks = []
+                        for chunk in pd.read_csv(file, header=1, encoding=encoding, chunksize=CHUNK_SIZE):
+                            chunks.append(chunk)
+                        df = pd.concat(chunks, ignore_index=True)
+                    else:
+                        df = pd.read_csv(file, header=1, encoding=encoding)
                 else:
-                    df = pd.read_csv(file, encoding=encoding)
+                    # For large files, read in chunks
+                    if file_size > 50:  # If file is larger than 50MB
+                        chunks = []
+                        for chunk in pd.read_csv(file, encoding=encoding, chunksize=CHUNK_SIZE):
+                            chunks.append(chunk)
+                        df = pd.concat(chunks, ignore_index=True)
+                    else:
+                        df = pd.read_csv(file, encoding=encoding)
                     table_name = None
                 
                 break  # If successful, break the encoding loop
@@ -547,21 +657,41 @@ def split_csv_endpoint():
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for i in range(num_files):
+                # Update progress
+                progress = int((i / num_files) * 100)
+                app.processing_status[task_id] = {
+                    'status': 'processing',
+                    'progress': progress,
+                    'message': f'Processing part {i + 1} of {num_files}'
+                }
                 start_idx = i * max_rows
                 end_idx = min((i + 1) * max_rows, total_rows)
-                chunk_df = df.iloc[start_idx:end_idx].copy()
                 
                 output_file = f"part_{i + 1}_of_{num_files}.csv"
                 output_path = os.path.join(temp_dir, output_file)
                 
+                # Write chunks to avoid memory issues
                 if table_name:
                     with open(output_path, 'w', encoding=encoding, newline='') as f:
                         f.write(f"{table_name}\n")
-                    chunk_df.to_csv(output_path, index=False, mode='a', encoding=encoding)
-                else:
-                    chunk_df.to_csv(output_path, index=False, encoding=encoding)
+                
+                # Process in smaller chunks for writing
+                write_header = True
+                for j in range(start_idx, end_idx, CHUNK_SIZE):
+                    chunk_end = min(j + CHUNK_SIZE, end_idx)
+                    chunk_df = df.iloc[j:chunk_end]
+                    
+                    if table_name:
+                        chunk_df.to_csv(output_path, index=False, mode='a', encoding=encoding, header=write_header)
+                    else:
+                        mode = 'w' if j == start_idx else 'a'
+                        chunk_df.to_csv(output_path, index=False, mode=mode, encoding=encoding, header=write_header)
+                    
+                    write_header = False
                 
                 zip_file.write(output_path, output_file)
+                # Remove the file immediately after adding to zip to save disk space
+                os.remove(output_path)
         
         zip_buffer.seek(0)
         
@@ -575,6 +705,13 @@ def split_csv_endpoint():
         )
         db.session.add(process_record)
         db.session.commit()
+        
+        # Mark as complete
+        app.processing_status[task_id] = {
+            'status': 'complete',
+            'progress': 100,
+            'message': 'Processing complete'
+        }
         
         return send_file(
             zip_buffer,
@@ -590,6 +727,142 @@ def split_csv_endpoint():
     finally:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
+
+def process_large_file_async(temp_upload, max_rows, task_id, original_filename, encodings):
+    """Process large files asynchronously"""
+    temp_dir = f'temp_split_files_{task_id}'
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    try:
+        # Try different encodings
+        for encoding in encodings:
+            try:
+                # Check for table name
+                with open(temp_upload, 'r', encoding=encoding) as f:
+                    first_line = f.readline().strip()
+                    f.seek(0)
+                    first_row = pd.read_csv(f, nrows=1, encoding=encoding)
+                    
+                    if len(first_row.columns) == 1:
+                        table_name = first_row.iloc[0, 0]
+                        df = pd.read_csv(temp_upload, header=1, encoding=encoding)
+                    else:
+                        df = pd.read_csv(temp_upload, encoding=encoding)
+                        table_name = None
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise UnicodeDecodeError(f"Could not decode file with any of these encodings: {', '.join(encodings)}")
+        
+        total_rows = len(df)
+        num_files = math.ceil(total_rows / max_rows)
+        
+        # Create zip file
+        zip_path = f'temp_result_{task_id}.zip'
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for i in range(num_files):
+                # Update progress
+                progress = int((i / num_files) * 100)
+                app.processing_status[task_id] = {
+                    'status': 'processing',
+                    'progress': progress,
+                    'message': f'Processing part {i + 1} of {num_files}'
+                }
+                
+                start_idx = i * max_rows
+                end_idx = min((i + 1) * max_rows, total_rows)
+                
+                output_file = f"part_{i + 1}_of_{num_files}.csv"
+                output_path = os.path.join(temp_dir, output_file)
+                
+                # Write with table name if exists
+                if table_name:
+                    with open(output_path, 'w', encoding=encoding, newline='') as f:
+                        f.write(f"{table_name}\n")
+                
+                # Write data in chunks
+                CHUNK_SIZE = 10000
+                write_header = True
+                for j in range(start_idx, end_idx, CHUNK_SIZE):
+                    chunk_end = min(j + CHUNK_SIZE, end_idx)
+                    chunk_df = df.iloc[j:chunk_end]
+                    
+                    if table_name:
+                        chunk_df.to_csv(output_path, index=False, mode='a', encoding=encoding, header=write_header)
+                    else:
+                        mode = 'w' if j == start_idx else 'a'
+                        chunk_df.to_csv(output_path, index=False, mode=mode, encoding=encoding, header=write_header)
+                    
+                    write_header = False
+                
+                zip_file.write(output_path, output_file)
+                os.remove(output_path)
+        
+        # Update status with download link
+        app.processing_status[task_id] = {
+            'status': 'complete',
+            'progress': 100,
+            'message': 'Processing complete',
+            'download_file': zip_path,
+            'original_filename': original_filename
+        }
+        
+        # Track in database
+        process_record = FileProcess(
+            filename=secure_filename(original_filename),
+            num_parts=num_files,
+            rows_processed=total_rows,
+            processing_time=time.time() - time.time(),
+            file_size=os.path.getsize(temp_upload) / (1024 * 1024)
+        )
+        db.session.add(process_record)
+        db.session.commit()
+        
+    except Exception as e:
+        app.processing_status[task_id] = {
+            'status': 'error',
+            'progress': 0,
+            'message': f'Error: {str(e)}'
+        }
+    
+    finally:
+        # Cleanup
+        if os.path.exists(temp_upload):
+            os.remove(temp_upload)
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+@app.route('/download/<task_id>', methods=['GET'])
+def download_result(task_id):
+    """Download the processed file for async tasks"""
+    status = app.processing_status.get(task_id)
+    
+    if not status or status['status'] != 'complete':
+        return 'File not ready or not found', 404
+    
+    zip_path = status.get('download_file')
+    original_filename = status.get('original_filename', 'file.csv')
+    
+    if not os.path.exists(zip_path):
+        return 'File not found', 404
+    
+    # Clean up status after download
+    def cleanup():
+        time.sleep(60)  # Keep file for 1 minute after download
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        if task_id in app.processing_status:
+            del app.processing_status[task_id]
+    
+    threading.Thread(target=cleanup).start()
+    
+    return send_file(
+        zip_path,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=f'split_{secure_filename(original_filename.replace(".csv", ""))}.zip'
+    )
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
