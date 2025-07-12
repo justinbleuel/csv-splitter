@@ -1,4 +1,4 @@
-# CSV Splitter!
+# CSV Splitter
 
 A web application for splitting large CSV files into smaller, manageable chunks. Built with Flask and deployable on Railway.
 
