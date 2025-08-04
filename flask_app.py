@@ -1,6 +1,6 @@
 from flask import Flask, request, send_file, render_template_string, jsonify
 try:
-    from models import db, FileProcess
+    from models import db, FileProcess, DuplicateRemoval
     HAS_DB = True
 except Exception as e:
     print(f"Database models not available: {e}")
@@ -17,6 +17,8 @@ from werkzeug.utils import secure_filename
 from datetime import datetime
 import uuid
 import threading
+import json
+from duplicate_remover import DuplicateRemover
 
 # Notification imports
 try:
@@ -116,7 +118,7 @@ TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>CSV Splitter</title>
+    <title>CSV Tools</title>
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <style>
         body {
@@ -152,6 +154,64 @@ TEMPLATE = '''
             font-size: 18px;
             color: #666;
             margin-bottom: 32px;
+        }
+
+        .feature-cards {
+            display: flex;
+            gap: 20px;
+            margin-top: 40px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .feature-card {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            flex: 1;
+            min-width: 280px;
+            max-width: 350px;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+        }
+
+        .feature-card h2 {
+            font-size: 28px;
+            margin-bottom: 12px;
+            color: #111;
+        }
+
+        .feature-card p {
+            font-size: 16px;
+            color: #666;
+            margin-bottom: 20px;
+        }
+
+        .feature-card .icon {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+
+        .back-btn {
+            background: transparent;
+            color: #666;
+            border: none;
+            font-size: 14px;
+            cursor: pointer;
+            margin-bottom: 20px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .back-btn:hover {
+            color: #333;
         }
 
         .upload-zone {
@@ -262,14 +322,54 @@ TEMPLATE = '''
             from { opacity: 0; transform: translateY(10px); }
             to { opacity: 1; transform: translateY(0); }
         }
+
+        .hidden {
+            display: none !important;
+        }
+
+        label {
+            display: block;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+            text-align: left;
+        }
+
+        select {
+            border: 2px solid #eef;
+            border-radius: 8px;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>CSV Splitter</h1>
-        <p class="subtitle">Split large CSV files into manageable chunks</p>
-        
-        <div class="card">
+        <!-- Home Section with Feature Cards -->
+        <div id="home-section">
+            <h1>CSV Tools</h1>
+            <p class="subtitle">Powerful tools for working with CSV files</p>
+            
+            <div class="feature-cards">
+                <div class="feature-card" onclick="showSplitter()">
+                    <div class="icon">✂️</div>
+                    <h2>Split Large CSV</h2>
+                    <p>Break large CSV files into smaller, manageable parts</p>
+                </div>
+                <div class="feature-card" onclick="showDuplicateRemover()">
+                    <div class="icon">🧹</div>
+                    <h2>Remove Duplicates</h2>
+                    <p>Clean your CSV by removing duplicate rows based on your criteria</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- CSV Splitter Section -->
+        <div id="splitter-section" class="hidden">
+            <button class="back-btn" onclick="showHome()">← Back to tools</button>
+            <h1>CSV Splitter</h1>
+            <p class="subtitle">Split large CSV files into manageable chunks</p>
+            
+            <div class="card">
             <form id="upload-form" action="/split" method="post" enctype="multipart/form-data">
                 <div class="upload-zone" id="upload-zone">
                     <input type="file" id="file-input" name="file" accept=".csv" style="display: none">
@@ -307,13 +407,105 @@ TEMPLATE = '''
                 </div>
             </div>
         </div>
-        
-        <!-- <div style="margin-top: 20px; text-align: center;">
-            <a href="/stats" style="color: #666; text-decoration: none;">View Usage Statistics</a>
-        </div> -->
+        </div>
+
+        <!-- Duplicate Remover Section -->
+        <div id="duplicate-remover-section" class="hidden">
+            <button class="back-btn" onclick="showHome()">← Back to tools</button>
+            <h1>Duplicate Remover</h1>
+            <p class="subtitle">Remove duplicate rows from your CSV files</p>
+            
+            <div class="card">
+                <!-- File Upload -->
+                <div id="duplicate-upload-section">
+                    <div class="upload-zone" id="duplicate-upload-zone">
+                        <input type="file" id="duplicate-file-input" accept=".csv" style="display: none">
+                        <p id="duplicate-file-name">Drop your CSV file here or click to browse</p>
+                    </div>
+                </div>
+
+                <!-- Column Selection (hidden initially) -->
+                <div id="duplicate-config-section" class="hidden">
+                    <h3>Select Duplicate Detection Criteria</h3>
+                    
+                    <div class="input-group">
+                        <label>Select columns to check for duplicates:</label>
+                        <select id="duplicate-columns" multiple style="width: 100%; height: 120px; padding: 8px; margin-top: 8px;">
+                        </select>
+                    </div>
+
+                    <div class="input-group">
+                        <label>Keep strategy:</label>
+                        <select id="keep-strategy" style="width: 100%; padding: 8px; margin-top: 8px;">
+                            <option value="first">Keep first occurrence</option>
+                            <option value="last">Keep last occurrence</option>
+                            <option value="not_empty">Keep row where specific column is not empty</option>
+                            <option value="most_recent">Keep row with most recent date</option>
+                            <option value="max_value">Keep row with highest value</option>
+                        </select>
+                    </div>
+
+                    <div id="strategy-column-group" class="input-group hidden">
+                        <label>Select column for strategy:</label>
+                        <select id="strategy-column" style="width: 100%; padding: 8px; margin-top: 8px;">
+                        </select>
+                    </div>
+
+                    <div style="margin-top: 20px;">
+                        <button onclick="previewDuplicates()" style="background: #666;">Preview Duplicates</button>
+                        <button onclick="processDuplicates()">Remove Duplicates</button>
+                    </div>
+                </div>
+
+                <!-- Preview Section -->
+                <div id="duplicate-preview-section" class="hidden" style="margin-top: 20px; text-align: left;">
+                    <h3>Duplicate Preview</h3>
+                    <div id="duplicate-preview-content"></div>
+                </div>
+
+                <!-- Loading -->
+                <div class="loading-container" id="duplicate-loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p style="color: #666; margin-top: 10px;">Processing duplicates...</p>
+                </div>
+
+                <!-- Success -->
+                <div id="duplicate-success" class="hidden">
+                    <p class="success-message">Duplicates removed successfully! 🎉</p>
+                    <div id="duplicate-stats" style="margin: 20px 0;"></div>
+                    <div class="action-buttons">
+                        <a href="#" class="action-btn download-btn" id="duplicate-download-btn">
+                            Download Cleaned CSV
+                        </a>
+                        <button class="action-btn reset-btn" onclick="resetDuplicateForm()">
+                            Clean Another File
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
+        // Section navigation functions
+        function showHome() {
+            document.getElementById('home-section').classList.remove('hidden');
+            document.getElementById('splitter-section').classList.add('hidden');
+            document.getElementById('duplicate-remover-section').classList.add('hidden');
+        }
+
+        function showSplitter() {
+            document.getElementById('home-section').classList.add('hidden');
+            document.getElementById('splitter-section').classList.remove('hidden');
+            document.getElementById('duplicate-remover-section').classList.add('hidden');
+        }
+
+        function showDuplicateRemover() {
+            document.getElementById('home-section').classList.add('hidden');
+            document.getElementById('splitter-section').classList.add('hidden');
+            document.getElementById('duplicate-remover-section').classList.remove('hidden');
+        }
+
         // Initialize drag and drop zone
         const uploadZone = document.getElementById('upload-zone');
         const fileInput = document.getElementById('file-input');
@@ -488,6 +680,234 @@ TEMPLATE = '''
             document.getElementById('loading').style.display = 'none';
             document.getElementById('progress-info').style.display = 'none';
             document.getElementById('progress-bar').style.width = '0%';
+        }
+
+        // Duplicate Remover Functions
+        let duplicateFile = null;
+        
+        // Initialize duplicate remover
+        const duplicateUploadZone = document.getElementById('duplicate-upload-zone');
+        const duplicateFileInput = document.getElementById('duplicate-file-input');
+        const duplicateFileName = document.getElementById('duplicate-file-name');
+        
+        // Click to upload
+        duplicateUploadZone.addEventListener('click', () => {
+            duplicateFileInput.click();
+        });
+        
+        // File input change
+        duplicateFileInput.addEventListener('change', async () => {
+            if (duplicateFileInput.files.length > 0) {
+                duplicateFile = duplicateFileInput.files[0];
+                duplicateFileName.textContent = duplicateFile.name;
+                await analyzeCsvFile();
+            }
+        });
+        
+        // Drag and drop handlers
+        duplicateUploadZone.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            duplicateUploadZone.classList.add('dragover');
+        });
+        
+        duplicateUploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            duplicateUploadZone.classList.add('dragover');
+        });
+        
+        duplicateUploadZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            duplicateUploadZone.classList.remove('dragover');
+        });
+        
+        duplicateUploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            duplicateUploadZone.classList.remove('dragover');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0 && files[0].name.endsWith('.csv')) {
+                duplicateFileInput.files = files;
+                duplicateFile = files[0];
+                duplicateFileName.textContent = files[0].name;
+                analyzeCsvFile();
+            }
+        });
+        
+        // Keep strategy change handler
+        document.getElementById('keep-strategy').addEventListener('change', (e) => {
+            const strategyColumnGroup = document.getElementById('strategy-column-group');
+            if (['not_empty', 'most_recent', 'max_value'].includes(e.target.value)) {
+                strategyColumnGroup.classList.remove('hidden');
+            } else {
+                strategyColumnGroup.classList.add('hidden');
+            }
+        });
+        
+        async function analyzeCsvFile() {
+            const formData = new FormData();
+            formData.append('file', duplicateFile);
+            
+            try {
+                const response = await fetch('/analyze-csv', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Failed to analyze file');
+                
+                const data = await response.json();
+                
+                // Populate column selectors
+                const columnSelect = document.getElementById('duplicate-columns');
+                const strategyColumnSelect = document.getElementById('strategy-column');
+                
+                columnSelect.innerHTML = '';
+                strategyColumnSelect.innerHTML = '';
+                
+                data.columns.forEach(col => {
+                    const option1 = new Option(col, col);
+                    const option2 = new Option(col, col);
+                    columnSelect.appendChild(option1);
+                    strategyColumnSelect.appendChild(option2);
+                });
+                
+                // Show configuration section
+                document.getElementById('duplicate-upload-section').classList.add('hidden');
+                document.getElementById('duplicate-config-section').classList.remove('hidden');
+                
+            } catch (error) {
+                alert('Error analyzing file: ' + error.message);
+                resetDuplicateForm();
+            }
+        }
+        
+        async function previewDuplicates() {
+            const selectedColumns = Array.from(document.getElementById('duplicate-columns').selectedOptions)
+                .map(opt => opt.value);
+                
+            if (selectedColumns.length === 0) {
+                alert('Please select at least one column to check for duplicates');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', duplicateFile);
+            formData.append('columns', JSON.stringify(selectedColumns));
+            
+            try {
+                const response = await fetch('/preview-duplicates', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Failed to preview duplicates');
+                
+                const data = await response.json();
+                
+                const previewSection = document.getElementById('duplicate-preview-section');
+                const previewContent = document.getElementById('duplicate-preview-content');
+                
+                if (data.total_duplicate_rows === 0) {
+                    previewContent.innerHTML = '<p>No duplicates found with the selected columns.</p>';
+                } else {
+                    let html = `<p><strong>${data.total_duplicate_rows}</strong> duplicate rows found 
+                        (${data.rows_to_remove} will be removed)</p>`;
+                    
+                    if (data.preview.length > 0) {
+                        html += '<div style="margin-top: 10px; font-size: 14px;">';
+                        data.preview.forEach((group, idx) => {
+                            html += `<div style="margin-bottom: 15px; padding: 10px; background: #f5f5f5; border-radius: 4px;">`;
+                            html += `<strong>Group ${idx + 1}:</strong> ${group.occurrences} occurrences<br>`;
+                            html += `Duplicate values: ${JSON.stringify(group.duplicate_values)}<br>`;
+                            html += '</div>';
+                        });
+                        html += '</div>';
+                    }
+                    
+                    previewContent.innerHTML = html;
+                }
+                
+                previewSection.classList.remove('hidden');
+                
+            } catch (error) {
+                alert('Error previewing duplicates: ' + error.message);
+            }
+        }
+        
+        async function processDuplicates() {
+            const selectedColumns = Array.from(document.getElementById('duplicate-columns').selectedOptions)
+                .map(opt => opt.value);
+                
+            if (selectedColumns.length === 0) {
+                alert('Please select at least one column to check for duplicates');
+                return;
+            }
+            
+            const keepStrategy = document.getElementById('keep-strategy').value;
+            const strategyColumn = document.getElementById('strategy-column').value;
+            
+            const formData = new FormData();
+            formData.append('file', duplicateFile);
+            formData.append('columns', JSON.stringify(selectedColumns));
+            formData.append('keep_strategy', keepStrategy);
+            
+            if (['not_empty', 'most_recent', 'max_value'].includes(keepStrategy)) {
+                formData.append('strategy_column', strategyColumn);
+            }
+            
+            // Hide config and show loading
+            document.getElementById('duplicate-config-section').classList.add('hidden');
+            document.getElementById('duplicate-preview-section').classList.add('hidden');
+            document.getElementById('duplicate-loading').style.display = 'block';
+            
+            try {
+                const response = await fetch('/process-duplicates', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Failed to process duplicates');
+                
+                const blob = await response.blob();
+                const downloadUrl = window.URL.createObjectURL(blob);
+                
+                // Get stats from response header
+                const stats = JSON.parse(response.headers.get('X-Process-Stats') || '{}');
+                
+                // Update success section
+                document.getElementById('duplicate-stats').innerHTML = `
+                    <p>Original rows: <strong>${stats.original_rows || 0}</strong></p>
+                    <p>Duplicates removed: <strong>${stats.rows_removed || 0}</strong></p>
+                    <p>Final rows: <strong>${stats.cleaned_rows || 0}</strong></p>
+                `;
+                
+                const downloadBtn = document.getElementById('duplicate-download-btn');
+                downloadBtn.href = downloadUrl;
+                downloadBtn.download = `cleaned_${duplicateFile.name}`;
+                
+                // Show success
+                document.getElementById('duplicate-loading').style.display = 'none';
+                document.getElementById('duplicate-success').classList.remove('hidden');
+                
+            } catch (error) {
+                alert('Error processing duplicates: ' + error.message);
+                resetDuplicateForm();
+            }
+        }
+        
+        function resetDuplicateForm() {
+            duplicateFile = null;
+            duplicateFileInput.value = '';
+            duplicateFileName.textContent = 'Drop your CSV file here or click to browse';
+            
+            document.getElementById('duplicate-upload-section').classList.remove('hidden');
+            document.getElementById('duplicate-config-section').classList.add('hidden');
+            document.getElementById('duplicate-preview-section').classList.add('hidden');
+            document.getElementById('duplicate-loading').style.display = 'none';
+            document.getElementById('duplicate-success').classList.add('hidden');
+            
+            document.getElementById('duplicate-columns').innerHTML = '';
+            document.getElementById('strategy-column').innerHTML = '';
         }
     </script>
 </body>
@@ -1087,6 +1507,149 @@ def download_result(task_id):
         as_attachment=True,
         download_name=f'split_{secure_filename(original_filename.replace(".csv", ""))}.zip'
     )
+
+# Duplicate Remover Routes
+@app.route('/analyze-csv', methods=['POST'])
+def analyze_csv():
+    """Analyze CSV file and return columns and metadata"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    # Save file temporarily
+    temp_filename = f'temp_analyze_{uuid.uuid4()}.csv'
+    file.save(temp_filename)
+    
+    try:
+        remover = DuplicateRemover(temp_filename)
+        analysis = remover.analyze_file()
+        
+        return jsonify(analysis)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+
+@app.route('/preview-duplicates', methods=['POST'])
+def preview_duplicates():
+    """Preview duplicates based on selected columns"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    
+    file = request.files['file']
+    columns = json.loads(request.form.get('columns', '[]'))
+    
+    if not columns:
+        return jsonify({'error': 'No columns selected'}), 400
+    
+    # Save file temporarily
+    temp_filename = f'temp_preview_{uuid.uuid4()}.csv'
+    file.save(temp_filename)
+    
+    try:
+        remover = DuplicateRemover(temp_filename)
+        remover.load_file()
+        preview_data = remover.find_duplicates(columns)
+        
+        return jsonify(preview_data)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+
+@app.route('/process-duplicates', methods=['POST'])
+def process_duplicates():
+    """Process file and remove duplicates"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    
+    file = request.files['file']
+    columns = json.loads(request.form.get('columns', '[]'))
+    keep_strategy = request.form.get('keep_strategy', 'first')
+    strategy_column = request.form.get('strategy_column', None)
+    
+    if not columns:
+        return jsonify({'error': 'No columns selected'}), 400
+    
+    # Save file temporarily
+    temp_filename = f'temp_process_{uuid.uuid4()}.csv'
+    output_filename = f'cleaned_{uuid.uuid4()}.csv'
+    file.save(temp_filename)
+    
+    try:
+        start_time = time.time()
+        file_size = os.path.getsize(temp_filename) / (1024 * 1024)  # MB
+        
+        remover = DuplicateRemover(temp_filename)
+        remover.load_file()
+        
+        # Remove duplicates
+        result = remover.remove_duplicates(columns, keep_strategy, strategy_column)
+        
+        # Save cleaned file
+        remover.save_cleaned_file(result['cleaned_df'], output_filename)
+        
+        # Save to database if available
+        if HAS_DB:
+            try:
+                with app.app_context():
+                    removal_record = DuplicateRemoval(
+                        filename=secure_filename(file.filename),
+                        original_rows=result['original_rows'],
+                        duplicates_removed=result['rows_removed'],
+                        check_columns=json.dumps(columns),
+                        keep_strategy=keep_strategy,
+                        strategy_column=strategy_column,
+                        processing_time=time.time() - start_time,
+                        file_size=file_size
+                    )
+                    db.session.add(removal_record)
+                    db.session.commit()
+            except Exception as e:
+                print(f"Could not save to database: {e}")
+        
+        # Create response with stats in header
+        response = send_file(
+            output_filename,
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name=f'cleaned_{secure_filename(file.filename)}'
+        )
+        
+        response.headers['X-Process-Stats'] = json.dumps({
+            'original_rows': result['original_rows'],
+            'cleaned_rows': result['cleaned_rows'],
+            'rows_removed': result['rows_removed']
+        })
+        
+        # Clean up after sending
+        def cleanup():
+            time.sleep(1)
+            if os.path.exists(output_filename):
+                os.remove(output_filename)
+        
+        threading.Thread(target=cleanup).start()
+        
+        return response
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5001)
