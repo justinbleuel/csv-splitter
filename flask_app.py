@@ -1,6 +1,6 @@
 from flask import Flask, request, send_file, render_template_string, jsonify
 try:
-    from models import db, FileProcess, DuplicateRemoval
+    from models import db, FileProcess, DuplicateRemoval, MergeOperation
     HAS_DB = True
 except Exception as e:
     print(f"Database models not available: {e}")
@@ -19,6 +19,7 @@ import uuid
 import threading
 import json
 from duplicate_remover import DuplicateRemover
+from csv_merger import CSVMerger
 
 # Notification imports
 try:
@@ -360,6 +361,11 @@ TEMPLATE = '''
                     <h2>Remove Duplicates</h2>
                     <p>Clean your CSV by removing duplicate rows based on your criteria</p>
                 </div>
+                <div class="feature-card" onclick="showMerger()">
+                    <div class="icon">🔗</div>
+                    <h2>Merge CSV Files</h2>
+                    <p>Combine multiple CSV files into a single consolidated file</p>
+                </div>
             </div>
         </div>
 
@@ -484,6 +490,116 @@ TEMPLATE = '''
                 </div>
             </div>
         </div>
+
+        <!-- CSV Merger Section -->
+        <div id="merger-section" class="hidden">
+            <button class="back-btn" onclick="showHome()">← Back to tools</button>
+            <h1>CSV Merger</h1>
+            <p class="subtitle">Combine multiple CSV files into one</p>
+            
+            <div class="card">
+                <!-- File Upload Zone -->
+                <div id="merger-upload-section">
+                    <div class="upload-zone" id="merger-upload-zone">
+                        <input type="file" id="merger-file-input" accept=".csv" multiple style="display: none">
+                        <p id="merger-file-text">Drop CSV files here or click to browse (select multiple)</p>
+                    </div>
+                    
+                    <!-- File List -->
+                    <div id="merger-file-list" class="hidden" style="margin-top: 20px;">
+                        <h3>Files to Merge:</h3>
+                        <div id="merger-file-items"></div>
+                    </div>
+                </div>
+
+                <!-- Merge Configuration (hidden initially) -->
+                <div id="merger-config-section" class="hidden">
+                    <h3>Merge Configuration</h3>
+                    
+                    <div class="input-group">
+                        <label>Merge Type:</label>
+                        <select id="merge-type" style="width: 100%; padding: 8px; margin-top: 8px;">
+                            <option value="vertical">Vertical Append (Stack rows)</option>
+                            <option value="horizontal">Horizontal Join (Merge columns)</option>
+                        </select>
+                    </div>
+
+                    <!-- Vertical Options -->
+                    <div id="vertical-options" style="margin-top: 20px;">
+                        <div class="input-group">
+                            <label>Column Handling:</label>
+                            <select id="columns-mode" style="width: 100%; padding: 8px; margin-top: 8px;">
+                                <option value="union">Include all columns (union)</option>
+                                <option value="intersection">Only common columns (intersection)</option>
+                            </select>
+                        </div>
+                        
+                        <div class="input-group" style="margin-top: 10px;">
+                            <label>
+                                <input type="checkbox" id="include-source" style="margin-right: 5px;">
+                                Add source file column
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Horizontal Options -->
+                    <div id="horizontal-options" class="hidden" style="margin-top: 20px;">
+                        <div class="input-group">
+                            <label>Join Columns:</label>
+                            <select id="join-columns" multiple style="width: 100%; height: 100px; padding: 8px; margin-top: 8px;">
+                            </select>
+                        </div>
+                        
+                        <div class="input-group" style="margin-top: 10px;">
+                            <label>Join Type:</label>
+                            <select id="join-type" style="width: 100%; padding: 8px; margin-top: 8px;">
+                                <option value="inner">Inner Join (matching rows only)</option>
+                                <option value="left">Left Join (all from first file)</option>
+                                <option value="right">Right Join (all from second file)</option>
+                                <option value="outer">Outer Join (all rows)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 20px;">
+                        <button onclick="previewMerge()" style="background: #666;">Preview Merge</button>
+                        <button onclick="processMerge()">Merge Files</button>
+                    </div>
+                </div>
+
+                <!-- Preview Section -->
+                <div id="merger-preview-section" class="hidden" style="margin-top: 20px; text-align: left;">
+                    <h3>Merge Preview</h3>
+                    <div id="merger-preview-content"></div>
+                </div>
+
+                <!-- Loading -->
+                <div class="loading-container" id="merger-loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p style="color: #666; margin-top: 10px;">Merging files...</p>
+                    <div class="progress-info" id="merger-progress-info" style="display: none; margin-top: 20px;">
+                        <p id="merger-progress-message">Processing...</p>
+                        <div style="width: 300px; height: 20px; background-color: rgba(200,200,200,0.3); border-radius: 10px; margin: 10px auto;">
+                            <div id="merger-progress-bar" style="width: 0%; height: 100%; background-color: #4ecdc4; border-radius: 10px; transition: width 0.3s;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Success -->
+                <div id="merger-success" class="hidden">
+                    <p class="success-message">Files merged successfully! 🎉</p>
+                    <div id="merger-stats" style="margin: 20px 0;"></div>
+                    <div class="action-buttons">
+                        <a href="#" class="action-btn download-btn" id="merger-download-btn">
+                            Download Merged CSV
+                        </a>
+                        <button class="action-btn reset-btn" onclick="resetMergerForm()">
+                            Merge More Files
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -492,18 +608,28 @@ TEMPLATE = '''
             document.getElementById('home-section').classList.remove('hidden');
             document.getElementById('splitter-section').classList.add('hidden');
             document.getElementById('duplicate-remover-section').classList.add('hidden');
+            document.getElementById('merger-section').classList.add('hidden');
         }
 
         function showSplitter() {
             document.getElementById('home-section').classList.add('hidden');
             document.getElementById('splitter-section').classList.remove('hidden');
             document.getElementById('duplicate-remover-section').classList.add('hidden');
+            document.getElementById('merger-section').classList.add('hidden');
         }
 
         function showDuplicateRemover() {
             document.getElementById('home-section').classList.add('hidden');
             document.getElementById('splitter-section').classList.add('hidden');
             document.getElementById('duplicate-remover-section').classList.remove('hidden');
+            document.getElementById('merger-section').classList.add('hidden');
+        }
+
+        function showMerger() {
+            document.getElementById('home-section').classList.add('hidden');
+            document.getElementById('splitter-section').classList.add('hidden');
+            document.getElementById('duplicate-remover-section').classList.add('hidden');
+            document.getElementById('merger-section').classList.remove('hidden');
         }
 
         // Initialize drag and drop zone
@@ -908,6 +1034,380 @@ TEMPLATE = '''
             
             document.getElementById('duplicate-columns').innerHTML = '';
             document.getElementById('strategy-column').innerHTML = '';
+        }
+        
+        // CSV Merger Functions
+        let mergerFiles = [];
+        let mergerFileData = {};
+        
+        // Initialize merger
+        const mergerUploadZone = document.getElementById('merger-upload-zone');
+        const mergerFileInput = document.getElementById('merger-file-input');
+        const mergerFileText = document.getElementById('merger-file-text');
+        
+        // Click to upload
+        mergerUploadZone.addEventListener('click', () => {
+            mergerFileInput.click();
+        });
+        
+        // File input change
+        mergerFileInput.addEventListener('change', async () => {
+            await handleMergerFiles(mergerFileInput.files);
+        });
+        
+        // Drag and drop handlers
+        mergerUploadZone.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            mergerUploadZone.classList.add('dragover');
+        });
+        
+        mergerUploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            mergerUploadZone.classList.add('dragover');
+        });
+        
+        mergerUploadZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            mergerUploadZone.classList.remove('dragover');
+        });
+        
+        mergerUploadZone.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            mergerUploadZone.classList.remove('dragover');
+            
+            const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
+            if (files.length > 0) {
+                await handleMergerFiles(files);
+            }
+        });
+        
+        // Merge type change handler
+        document.getElementById('merge-type').addEventListener('change', (e) => {
+            if (e.target.value === 'vertical') {
+                document.getElementById('vertical-options').classList.remove('hidden');
+                document.getElementById('horizontal-options').classList.add('hidden');
+            } else {
+                document.getElementById('vertical-options').classList.add('hidden');
+                document.getElementById('horizontal-options').classList.remove('hidden');
+                // Populate join columns if we have files
+                if (mergerFiles.length >= 2) {
+                    populateJoinColumns();
+                }
+            }
+        });
+        
+        async function handleMergerFiles(files) {
+            for (const file of files) {
+                if (!mergerFileData[file.name]) {
+                    mergerFiles.push(file);
+                    mergerFileData[file.name] = file;
+                }
+            }
+            
+            updateMergerFileList();
+            
+            if (mergerFiles.length >= 2) {
+                // Analyze files
+                await analyzeMergerFiles();
+            }
+        }
+        
+        function updateMergerFileList() {
+            const fileList = document.getElementById('merger-file-list');
+            const fileItems = document.getElementById('merger-file-items');
+            
+            if (mergerFiles.length === 0) {
+                fileList.classList.add('hidden');
+                return;
+            }
+            
+            fileList.classList.remove('hidden');
+            
+            let html = '';
+            mergerFiles.forEach((file, index) => {
+                html += `
+                    <div style="padding: 10px; background: #f5f5f5; margin: 5px 0; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;">
+                        <span>${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)</span>
+                        <button onclick="removeMergerFile(${index})" style="background: #ff4444; padding: 5px 10px; font-size: 12px;">Remove</button>
+                    </div>
+                `;
+            });
+            
+            fileItems.innerHTML = html;
+            mergerFileText.textContent = `${mergerFiles.length} files selected. Add more or continue.`;
+        }
+        
+        function removeMergerFile(index) {
+            const file = mergerFiles[index];
+            delete mergerFileData[file.name];
+            mergerFiles.splice(index, 1);
+            updateMergerFileList();
+            
+            if (mergerFiles.length < 2) {
+                document.getElementById('merger-config-section').classList.add('hidden');
+            }
+        }
+        
+        async function analyzeMergerFiles() {
+            const formData = new FormData();
+            mergerFiles.forEach((file, index) => {
+                formData.append(`file_${index}`, file);
+            });
+            
+            try {
+                const response = await fetch('/analyze-merge-files', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Failed to analyze files');
+                
+                const data = await response.json();
+                
+                // Store analysis data globally for later use
+                window.mergerAnalysisData = data;
+                
+                // Show configuration section
+                document.getElementById('merger-config-section').classList.remove('hidden');
+                
+                // If horizontal merge, populate join columns
+                if (document.getElementById('merge-type').value === 'horizontal') {
+                    populateJoinColumns();
+                }
+                
+            } catch (error) {
+                alert('Error analyzing files: ' + error.message);
+            }
+        }
+        
+        function populateJoinColumns() {
+            const joinColumnsSelect = document.getElementById('join-columns');
+            
+            if (window.mergerAnalysisData && window.mergerAnalysisData.common_columns) {
+                joinColumnsSelect.innerHTML = '';
+                
+                window.mergerAnalysisData.common_columns.forEach(col => {
+                    const option = new Option(col, col);
+                    joinColumnsSelect.appendChild(option);
+                });
+                
+                if (window.mergerAnalysisData.common_columns.length === 0) {
+                    joinColumnsSelect.innerHTML = '<option>No common columns found</option>';
+                }
+            } else {
+                joinColumnsSelect.innerHTML = '<option>No common columns found</option>';
+            }
+        }
+        
+        async function previewMerge() {
+            const mergeType = document.getElementById('merge-type').value;
+            const formData = new FormData();
+            
+            mergerFiles.forEach((file, index) => {
+                formData.append(`file_${index}`, file);
+            });
+            
+            formData.append('merge_type', mergeType);
+            
+            if (mergeType === 'vertical') {
+                formData.append('columns_mode', document.getElementById('columns-mode').value);
+                formData.append('include_source', document.getElementById('include-source').checked);
+            } else {
+                const selectedJoinColumns = Array.from(document.getElementById('join-columns').selectedOptions)
+                    .map(opt => opt.value);
+                formData.append('join_columns', JSON.stringify(selectedJoinColumns));
+                formData.append('join_type', document.getElementById('join-type').value);
+            }
+            
+            try {
+                const response = await fetch('/preview-merge', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Failed to generate preview');
+                
+                const data = await response.json();
+                
+                const previewSection = document.getElementById('merger-preview-section');
+                const previewContent = document.getElementById('merger-preview-content');
+                
+                let html = '<div style="overflow-x: auto;">';
+                html += '<table style="border-collapse: collapse; width: 100%; font-size: 14px;">';
+                
+                // Header
+                html += '<thead><tr>';
+                data.columns.forEach(col => {
+                    html += `<th style="border: 1px solid #ddd; padding: 8px; background: #f5f5f5;">${col}</th>`;
+                });
+                html += '</tr></thead>';
+                
+                // Data rows
+                html += '<tbody>';
+                data.preview_data.forEach(row => {
+                    html += '<tr>';
+                    data.columns.forEach(col => {
+                        html += `<td style="border: 1px solid #ddd; padding: 8px;">${row[col] || ''}</td>`;
+                    });
+                    html += '</tr>';
+                });
+                html += '</tbody></table></div>';
+                
+                // Stats
+                html += '<div style="margin-top: 15px;">';
+                html += `<p><strong>Merge Statistics:</strong></p>`;
+                html += `<ul style="list-style: none; padding: 0;">`;
+                Object.entries(data.stats).forEach(([key, value]) => {
+                    const label = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                    html += `<li>${label}: ${value}</li>`;
+                });
+                html += '</ul></div>';
+                
+                previewContent.innerHTML = html;
+                previewSection.classList.remove('hidden');
+                
+            } catch (error) {
+                alert('Error generating preview: ' + error.message);
+            }
+        }
+        
+        async function processMerge() {
+            const mergeType = document.getElementById('merge-type').value;
+            const formData = new FormData();
+            
+            mergerFiles.forEach((file, index) => {
+                formData.append(`file_${index}`, file);
+            });
+            
+            formData.append('merge_type', mergeType);
+            
+            if (mergeType === 'vertical') {
+                formData.append('columns_mode', document.getElementById('columns-mode').value);
+                formData.append('include_source', document.getElementById('include-source').checked);
+            } else {
+                const selectedJoinColumns = Array.from(document.getElementById('join-columns').selectedOptions)
+                    .map(opt => opt.value);
+                formData.append('join_columns', JSON.stringify(selectedJoinColumns));
+                formData.append('join_type', document.getElementById('join-type').value);
+            }
+            
+            // Hide config and show loading
+            document.getElementById('merger-config-section').classList.add('hidden');
+            document.getElementById('merger-preview-section').classList.add('hidden');
+            document.getElementById('merger-loading').style.display = 'block';
+            
+            try {
+                const response = await fetch('/process-merge', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Failed to merge files');
+                
+                // Check if it's an async task
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const data = await response.json();
+                    if (data.task_id) {
+                        // Large file processing
+                        document.getElementById('merger-progress-info').style.display = 'block';
+                        await trackMergerProgress(data.task_id);
+                    }
+                } else {
+                    // Small file - direct download
+                    const blob = await response.blob();
+                    const downloadUrl = window.URL.createObjectURL(blob);
+                    
+                    // Get stats from response header
+                    const stats = JSON.parse(response.headers.get('X-Merge-Stats') || '{}');
+                    
+                    // Update success section
+                    document.getElementById('merger-stats').innerHTML = `
+                        <p>Files merged: <strong>${stats.files_merged || mergerFiles.length}</strong></p>
+                        <p>Total rows: <strong>${(stats.total_rows || 0).toLocaleString()}</strong></p>
+                        <p>Total columns: <strong>${stats.total_columns || 0}</strong></p>
+                    `;
+                    
+                    const downloadBtn = document.getElementById('merger-download-btn');
+                    downloadBtn.href = downloadUrl;
+                    downloadBtn.download = `merged_${new Date().getTime()}.csv`;
+                    
+                    // Show success
+                    document.getElementById('merger-loading').style.display = 'none';
+                    document.getElementById('merger-success').classList.remove('hidden');
+                }
+                
+            } catch (error) {
+                alert('Error merging files: ' + error.message);
+                resetMergerForm();
+            }
+        }
+        
+        async function trackMergerProgress(taskId) {
+            const progressBar = document.getElementById('merger-progress-bar');
+            const progressMessage = document.getElementById('merger-progress-message');
+            
+            const checkInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/merge-progress/${taskId}`);
+                    const status = await response.json();
+                    
+                    if (status.status === 'processing') {
+                        progressBar.style.width = status.progress + '%';
+                        progressMessage.textContent = status.message;
+                    } else if (status.status === 'complete') {
+                        clearInterval(checkInterval);
+                        progressBar.style.width = '100%';
+                        progressMessage.textContent = 'Merge complete!';
+                        
+                        // Set download link
+                        const downloadBtn = document.getElementById('merger-download-btn');
+                        downloadBtn.href = `/download-merge/${taskId}`;
+                        downloadBtn.removeAttribute('download');
+                        
+                        // Update stats
+                        document.getElementById('merger-stats').innerHTML = `
+                            <p>Files merged: <strong>${status.stats.files_merged || mergerFiles.length}</strong></p>
+                            <p>Total rows: <strong>${(status.stats.total_rows || 0).toLocaleString()}</strong></p>
+                            <p>Total columns: <strong>${status.stats.total_columns || 0}</strong></p>
+                        `;
+                        
+                        setTimeout(() => {
+                            document.getElementById('merger-loading').style.display = 'none';
+                            document.getElementById('merger-success').classList.remove('hidden');
+                        }, 500);
+                    } else if (status.status === 'error') {
+                        clearInterval(checkInterval);
+                        throw new Error(status.message);
+                    }
+                } catch (error) {
+                    clearInterval(checkInterval);
+                    alert('Error: ' + error.message);
+                    resetMergerForm();
+                }
+            }, 1000);
+        }
+        
+        function resetMergerForm() {
+            mergerFiles = [];
+            mergerFileData = {};
+            mergerFileInput.value = '';
+            mergerFileText.textContent = 'Drop CSV files here or click to browse (select multiple)';
+            
+            document.getElementById('merger-file-list').classList.add('hidden');
+            document.getElementById('merger-config-section').classList.add('hidden');
+            document.getElementById('merger-preview-section').classList.add('hidden');
+            document.getElementById('merger-loading').style.display = 'none';
+            document.getElementById('merger-success').classList.add('hidden');
+            document.getElementById('merger-progress-info').style.display = 'none';
+            document.getElementById('merger-progress-bar').style.width = '0%';
+            
+            // Reset form values
+            document.getElementById('merge-type').value = 'vertical';
+            document.getElementById('columns-mode').value = 'union';
+            document.getElementById('include-source').checked = false;
+            document.getElementById('join-columns').innerHTML = '';
+            document.getElementById('join-type').value = 'inner';
         }
     </script>
 </body>
@@ -1650,6 +2150,365 @@ def process_duplicates():
         # Clean up temp file
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
+
+# CSV Merger Routes
+@app.route('/analyze-merge-files', methods=['POST'])
+def analyze_merge_files():
+    """Analyze multiple CSV files for merging"""
+    files = []
+    file_count = 0
+    
+    # Collect all uploaded files
+    for key in request.files:
+        if key.startswith('file_'):
+            files.append(request.files[key])
+            file_count += 1
+    
+    if file_count < 2:
+        return jsonify({'error': 'At least 2 files required for merging'}), 400
+    
+    merger = CSVMerger()
+    temp_files = []
+    
+    try:
+        # Save files temporarily and analyze
+        for idx, file in enumerate(files):
+            temp_filename = f'temp_merge_{uuid.uuid4()}_{idx}.csv'
+            file.save(temp_filename)
+            temp_files.append(temp_filename)
+            merger.add_file(temp_filename)
+        
+        analysis = merger.analyze_files()
+        
+        # Add common columns for horizontal merge
+        if 'column_analysis' in analysis:
+            analysis['common_columns'] = analysis['column_analysis']['common_columns']
+        
+        return jsonify(analysis)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    finally:
+        # Clean up temp files
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+@app.route('/preview-merge', methods=['POST'])
+def preview_merge():
+    """Preview the merge operation"""
+    files = []
+    
+    # Collect all uploaded files
+    for key in request.files:
+        if key.startswith('file_'):
+            files.append(request.files[key])
+    
+    if len(files) < 2:
+        return jsonify({'error': 'At least 2 files required for merging'}), 400
+    
+    merge_type = request.form.get('merge_type', 'vertical')
+    
+    # Build options
+    options = {}
+    if merge_type == 'vertical':
+        options['columns_mode'] = request.form.get('columns_mode', 'union')
+        options['include_source'] = request.form.get('include_source') == 'true'
+    else:
+        options['join_columns'] = json.loads(request.form.get('join_columns', '[]'))
+        options['join_type'] = request.form.get('join_type', 'inner')
+    
+    merger = CSVMerger()
+    temp_files = []
+    
+    try:
+        # Save files temporarily
+        for idx, file in enumerate(files):
+            temp_filename = f'temp_preview_{uuid.uuid4()}_{idx}.csv'
+            file.save(temp_filename)
+            temp_files.append(temp_filename)
+            merger.add_file(temp_filename)
+        
+        # Generate preview
+        preview_result = merger.preview_merge(merge_type, options)
+        
+        return jsonify(preview_result)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    finally:
+        # Clean up temp files
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+@app.route('/process-merge', methods=['POST'])
+def process_merge():
+    """Process the merge operation"""
+    files = []
+    file_names = []
+    
+    # Collect all uploaded files
+    for key in request.files:
+        if key.startswith('file_'):
+            file = request.files[key]
+            files.append(file)
+            file_names.append(secure_filename(file.filename))
+    
+    if len(files) < 2:
+        return jsonify({'error': 'At least 2 files required for merging'}), 400
+    
+    merge_type = request.form.get('merge_type', 'vertical')
+    
+    # Build options
+    options = {}
+    if merge_type == 'vertical':
+        options['columns_mode'] = request.form.get('columns_mode', 'union')
+        options['include_source'] = request.form.get('include_source') == 'true'
+    else:
+        options['join_columns'] = json.loads(request.form.get('join_columns', '[]'))
+        options['join_type'] = request.form.get('join_type', 'inner')
+    
+    # Generate task ID for large files
+    task_id = str(uuid.uuid4())
+    
+    # Check combined file size
+    total_size_mb = sum(len(f.read()) / (1024 * 1024) for f in files)
+    for f in files:
+        f.seek(0)  # Reset file pointers
+    
+    # For large files, process asynchronously
+    if total_size_mb > 50:
+        # Save files temporarily
+        temp_files = []
+        for idx, file in enumerate(files):
+            temp_filename = f'temp_merge_{task_id}_{idx}.csv'
+            file.save(temp_filename)
+            temp_files.append(temp_filename)
+        
+        # Initialize progress tracking
+        app.processing_status[task_id] = {
+            'status': 'processing',
+            'progress': 0,
+            'message': 'Starting merge operation...'
+        }
+        
+        # Process in background thread
+        thread = threading.Thread(
+            target=process_merge_async,
+            args=(temp_files, file_names, merge_type, options, task_id, total_size_mb)
+        )
+        thread.start()
+        
+        return jsonify({
+            'task_id': task_id,
+            'message': 'Processing large files in background'
+        }), 202
+    
+    # Process synchronously for smaller files
+    merger = CSVMerger()
+    temp_files = []
+    
+    try:
+        start_time = time.time()
+        
+        # Save files temporarily
+        for idx, file in enumerate(files):
+            temp_filename = f'temp_merge_sync_{uuid.uuid4()}_{idx}.csv'
+            file.save(temp_filename)
+            temp_files.append(temp_filename)
+            merger.add_file(temp_filename)
+        
+        # Execute merge
+        output_filename = f'merged_{uuid.uuid4()}.csv'
+        result = merger.execute_merge(merge_type, options, output_filename)
+        
+        if result.get('error'):
+            return jsonify(result), 500
+        
+        # Save to database if available
+        if HAS_DB:
+            try:
+                with app.app_context():
+                    merge_record = MergeOperation(
+                        files_merged=len(files),
+                        file_names=json.dumps(file_names),
+                        merge_type=merge_type,
+                        merge_options=json.dumps(options),
+                        total_input_rows=merger.total_rows,
+                        total_output_rows=result['rows'],
+                        total_columns=result['columns'],
+                        processing_time=time.time() - start_time,
+                        total_size_mb=total_size_mb
+                    )
+                    db.session.add(merge_record)
+                    db.session.commit()
+            except Exception as e:
+                print(f"Could not save to database: {e}")
+        
+        # Create response
+        response = send_file(
+            output_filename,
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name=f'merged_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        )
+        
+        response.headers['X-Merge-Stats'] = json.dumps({
+            'files_merged': len(files),
+            'total_rows': result['rows'],
+            'total_columns': result['columns']
+        })
+        
+        # Clean up after sending
+        def cleanup():
+            time.sleep(1)
+            if os.path.exists(output_filename):
+                os.remove(output_filename)
+        
+        threading.Thread(target=cleanup).start()
+        
+        return response
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    finally:
+        # Clean up temp files
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+def process_merge_async(temp_files, file_names, merge_type, options, task_id, total_size_mb):
+    """Process large merge operations asynchronously"""
+    print(f"=== Starting async merge for {len(temp_files)} files ===")
+    
+    try:
+        start_time = time.time()
+        merger = CSVMerger()
+        
+        # Add files to merger
+        for idx, temp_file in enumerate(temp_files):
+            progress = int((idx / len(temp_files)) * 30)  # 30% for loading files
+            app.processing_status[task_id] = {
+                'status': 'processing',
+                'progress': progress,
+                'message': f'Loading file {idx + 1} of {len(temp_files)}'
+            }
+            merger.add_file(temp_file)
+        
+        # Update progress
+        app.processing_status[task_id] = {
+            'status': 'processing',
+            'progress': 40,
+            'message': 'Analyzing files...'
+        }
+        
+        # Execute merge
+        output_path = f'temp_result_{task_id}.csv'
+        
+        # Update progress
+        app.processing_status[task_id] = {
+            'status': 'processing',
+            'progress': 50,
+            'message': 'Merging files...'
+        }
+        
+        result = merger.execute_merge(merge_type, options, output_path)
+        
+        if result.get('error'):
+            raise Exception(result['error'])
+        
+        # Update progress
+        app.processing_status[task_id] = {
+            'status': 'processing',
+            'progress': 90,
+            'message': 'Finalizing...'
+        }
+        
+        # Save to database if available
+        if HAS_DB:
+            try:
+                with app.app_context():
+                    merge_record = MergeOperation(
+                        files_merged=len(temp_files),
+                        file_names=json.dumps(file_names),
+                        merge_type=merge_type,
+                        merge_options=json.dumps(options),
+                        total_input_rows=merger.total_rows,
+                        total_output_rows=result['rows'],
+                        total_columns=result['columns'],
+                        processing_time=time.time() - start_time,
+                        total_size_mb=total_size_mb
+                    )
+                    db.session.add(merge_record)
+                    db.session.commit()
+            except Exception as e:
+                print(f"Could not save to database: {e}")
+        
+        # Update status with completion
+        app.processing_status[task_id] = {
+            'status': 'complete',
+            'progress': 100,
+            'message': 'Merge complete',
+            'download_file': output_path,
+            'stats': {
+                'files_merged': len(temp_files),
+                'total_rows': result['rows'],
+                'total_columns': result['columns']
+            }
+        }
+        
+    except Exception as e:
+        app.processing_status[task_id] = {
+            'status': 'error',
+            'progress': 0,
+            'message': f'Error: {str(e)}'
+        }
+    
+    finally:
+        # Cleanup temp files
+        for temp_file in temp_files:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+@app.route('/merge-progress/<task_id>', methods=['GET'])
+def get_merge_progress(task_id):
+    """Get merge operation progress"""
+    status = app.processing_status.get(task_id, {'status': 'not_found'})
+    return jsonify(status)
+
+@app.route('/download-merge/<task_id>', methods=['GET'])
+def download_merge_result(task_id):
+    """Download the merged file for async tasks"""
+    status = app.processing_status.get(task_id)
+    
+    if not status or status['status'] != 'complete':
+        return 'File not ready or not found', 404
+    
+    output_path = status.get('download_file')
+    
+    if not os.path.exists(output_path):
+        return 'File not found', 404
+    
+    # Clean up status after download
+    def cleanup():
+        time.sleep(60)  # Keep file for 1 minute after download
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        if task_id in app.processing_status:
+            del app.processing_status[task_id]
+    
+    threading.Thread(target=cleanup).start()
+    
+    return send_file(
+        output_path,
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name=f'merged_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+    )
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5001)
