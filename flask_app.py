@@ -512,6 +512,13 @@ TEMPLATE = '''
                     </div>
                 </div>
 
+                <!-- Analyzing Files Loading State -->
+                <div class="loading-container" id="merger-analyzing" style="display: none;">
+                    <div class="spinner"></div>
+                    <p style="color: #666; margin-top: 10px;">Analyzing CSV files...</p>
+                    <p style="color: #999; font-size: 14px; margin-top: 5px;">This may take a moment for large files</p>
+                </div>
+
                 <!-- Merge Configuration (hidden initially) -->
                 <div id="merger-config-section" class="hidden">
                     <h3>Merge Configuration</h3>
@@ -1148,11 +1155,16 @@ TEMPLATE = '''
             
             if (mergerFiles.length < 2) {
                 document.getElementById('merger-config-section').classList.add('hidden');
+                document.getElementById('merger-analyzing').style.display = 'none';
             }
         }
         
         async function analyzeMergerFiles() {
             console.log('analyzeMergerFiles called');
+            
+            // Show analyzing loading state
+            document.getElementById('merger-analyzing').style.display = 'block';
+            
             const formData = new FormData();
             mergerFiles.forEach((file, index) => {
                 console.log(`Adding file ${index}:`, file.name);
@@ -1179,6 +1191,9 @@ TEMPLATE = '''
                 // Store analysis data globally for later use
                 window.mergerAnalysisData = data;
                 
+                // Hide analyzing loading state
+                document.getElementById('merger-analyzing').style.display = 'none';
+                
                 // Show configuration section
                 console.log('Showing configuration section...');
                 const configSection = document.getElementById('merger-config-section');
@@ -1197,6 +1212,8 @@ TEMPLATE = '''
                 
             } catch (error) {
                 console.error('Error in analyzeMergerFiles:', error);
+                // Hide analyzing loading state on error
+                document.getElementById('merger-analyzing').style.display = 'none';
                 alert('Error analyzing files: ' + error.message);
             }
         }
@@ -1416,6 +1433,7 @@ TEMPLATE = '''
             mergerFileText.textContent = 'Drop CSV files here or click to browse (select multiple)';
             
             document.getElementById('merger-file-list').classList.add('hidden');
+            document.getElementById('merger-analyzing').style.display = 'none';
             document.getElementById('merger-config-section').classList.add('hidden');
             document.getElementById('merger-preview-section').classList.add('hidden');
             document.getElementById('merger-loading').style.display = 'none';
