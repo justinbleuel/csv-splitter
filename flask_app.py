@@ -1097,6 +1097,7 @@ TEMPLATE = '''
         });
         
         async function handleMergerFiles(files) {
+            console.log('handleMergerFiles called with', files.length, 'files');
             for (const file of files) {
                 if (!mergerFileData[file.name]) {
                     mergerFiles.push(file);
@@ -1104,9 +1105,11 @@ TEMPLATE = '''
                 }
             }
             
+            console.log('Total merger files:', mergerFiles.length);
             updateMergerFileList();
             
             if (mergerFiles.length >= 2) {
+                console.log('Analyzing files...');
                 // Analyze files
                 await analyzeMergerFiles();
             }
@@ -1149,26 +1152,43 @@ TEMPLATE = '''
         }
         
         async function analyzeMergerFiles() {
+            console.log('analyzeMergerFiles called');
             const formData = new FormData();
             mergerFiles.forEach((file, index) => {
+                console.log(`Adding file ${index}:`, file.name);
                 formData.append(`file_${index}`, file);
             });
             
             try {
+                console.log('Fetching /analyze-merge-files...');
                 const response = await fetch('/analyze-merge-files', {
                     method: 'POST',
                     body: formData
                 });
                 
-                if (!response.ok) throw new Error('Failed to analyze files');
+                console.log('Response status:', response.status);
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('Error response:', errorText);
+                    throw new Error('Failed to analyze files: ' + errorText);
+                }
                 
                 const data = await response.json();
+                console.log('Analysis data:', data);
                 
                 // Store analysis data globally for later use
                 window.mergerAnalysisData = data;
                 
                 // Show configuration section
-                document.getElementById('merger-config-section').classList.remove('hidden');
+                console.log('Showing configuration section...');
+                const configSection = document.getElementById('merger-config-section');
+                console.log('Config section element:', configSection);
+                if (configSection) {
+                    configSection.classList.remove('hidden');
+                    console.log('Hidden class removed');
+                } else {
+                    console.error('merger-config-section element not found!');
+                }
                 
                 // If horizontal merge, populate join columns
                 if (document.getElementById('merge-type').value === 'horizontal') {
@@ -1176,6 +1196,7 @@ TEMPLATE = '''
                 }
                 
             } catch (error) {
+                console.error('Error in analyzeMergerFiles:', error);
                 alert('Error analyzing files: ' + error.message);
             }
         }
@@ -1258,7 +1279,7 @@ TEMPLATE = '''
                 html += `<p><strong>Merge Statistics:</strong></p>`;
                 html += `<ul style="list-style: none; padding: 0;">`;
                 Object.entries(data.stats).forEach(([key, value]) => {
-                    const label = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                    const label = key.replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase());
                     html += `<li>${label}: ${value}</li>`;
                 });
                 html += '</ul></div>';
